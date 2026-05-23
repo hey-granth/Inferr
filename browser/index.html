@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Inferr</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+    <main id="app">
+        <header class="header">
+            <div class="title">Inferr</div>
+            <div class="ws-status">
+                <span id="ws-dot" class="dot disconnected"></span>
+                <span class="label">WS</span>
+            </div>
+        </header>
+
+        <section id="waveform" aria-hidden="true">
+            <span class="bar"></span>
+            <span class="bar"></span>
+            <span class="bar"></span>
+            <span class="bar"></span>
+            <span class="bar"></span>
+        </section>
+
+        <section class="controls">
+            <button id="mic-btn" type="button">Mic</button>
+        </section>
+
+        <div id="voice-warning" class="hidden">
+            Voice input requires Chrome. Use the text input below.
+        </div>
+
+        <section class="input">
+            <textarea id="typed-input" rows="3" placeholder="Type your question here..."></textarea>
+            <button id="send-btn" type="button">Send</button>
+        </section>
+
+        <section id="last-exchange"></section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+
+</html>

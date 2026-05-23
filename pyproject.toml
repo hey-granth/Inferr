@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inferr"
+version = "0.1.0"
+description = "Voice-native ambient pair programming companion"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Inferr" }]
+dependencies = [
+  "fastapi>=0.111.0",
+  "uvicorn[standard]>=0.30.0",
+  "anthropic>=0.28.0",
+  "ptyprocess>=0.7.0",
+  "watchdog>=4.0.0",
+  "click>=8.1.0",
+  "pydantic>=2.7.0",
+  "httpx>=0.27.0",
+  "websockets>=12.0",
+  "pyttsx3>=2.90",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+  "pytest-asyncio>=0.23.0",
+  "pyright>=1.1.409",
+]
+
+[project.scripts]
+inferr = "inferr.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["inferr"]
+
+[tool.hatch.build.targets.sdist]
+include = ["inferr", "browser", "tests", "README.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
