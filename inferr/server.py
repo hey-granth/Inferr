@@ -19,18 +19,20 @@ from inferr.config import Config, load_config
 from inferr.context import ContextAssembler
 from inferr.llm import query_llm
 from inferr.models import (
+    ContextObject,
     ConversationTurn,
     QueryRequest,
     QueryResponse,
     WebSocketMessage,
 )
-from inferr.tts import speak_pyttsx3
+from inferr.tts import SilkTTSBackend, TTSBackend, get_tts_backend
 
 logger = logging.getLogger("inferr.server")
 
 session_id: str | None = None
 context_assembler: ContextAssembler | None = None
 conversation_history: list[ConversationTurn] = []
+tts_backend: TTSBackend | None = None
 last_activity: datetime | None = None
 
 CONFIG_OVERRIDE: Config | None = None
@@ -85,7 +87,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 @app.post("/session/start")
 async def start_session() -> dict[str, str]:
     """Initialize a new Inferr session and context capture."""
-    global session_id, context_assembler, conversation_history
+    global session_id, context_assembler, conversation_history, tts_backend
 
     config = get_config()
     if context_assembler is not None:
@@ -93,6 +95,7 @@ async def start_session() -> dict[str, str]:
 
     context_assembler = ContextAssembler(config)
     context_assembler.start()
+    tts_backend = get_tts_backend(config)
     session_id = str(uuid.uuid4())
     conversation_history = []
 
@@ -112,11 +115,12 @@ async def start_session() -> dict[str, str]:
 @app.post("/session/stop")
 async def stop_session() -> dict[str, str]:
     """Stop the current Inferr session."""
-    global session_id, context_assembler, conversation_history
+    global session_id, context_assembler, conversation_history, tts_backend
 
     if context_assembler is not None:
         context_assembler.stop()
     context_assembler = None
+    tts_backend = None
     session_id = None
     conversation_history = []
 
@@ -140,7 +144,21 @@ async def health() -> dict[str, object | None]:
         "status": "ok",
         "session_active": session_id is not None,
         "last_activity": last_activity.isoformat() if last_activity else None,
+        "tts_backend": tts_backend.name() if tts_backend is not None else None,
     }
+
+
+def resolve_tone(context: ContextObject) -> str:
+    """
+    Returns 'urgent' if any flagged errors are present.
+    Returns 'warm' if conversation_history is empty (first query of the session).
+    Returns 'neutral' otherwise.
+    """
+    if any(error.type != "marker" for error in context.flagged_errors):
+        return "urgent"
+    if not context.conversation_history:
+        return "warm"
+    return "neutral"
 
 
 @app.websocket("/ws")
@@ -150,6 +168,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
 
     try:
+        if isinstance(tts_backend, SilkTTSBackend):
+            tts_backend.set_ws_connection(websocket)
         while True:
             data = await websocket.receive_text()
             try:
@@ -172,8 +192,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     continue
 
                 context = context_assembler.assemble(session_id, conversation_history)
+                tone = resolve_tone(context)
                 request = QueryRequest(transcript=message.payload, context=context)
-                response_text = await query_llm(request, get_config())
+                response_text = await query_llm(request, get_config(), tone=tone)
 
                 conversation_history.append(
                     ConversationTurn(role="user", content=message.payload)
@@ -186,15 +207,40 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
                 last_activity = datetime.now(timezone.utc)
 
-                await websocket.send_json({"type": "response", "text": response_text})
+                has_errors = any(
+                    flagged_error.type != "marker"
+                    for flagged_error in context.flagged_errors
+                )
+                backend_name = tts_backend.name() if tts_backend is not None else "browser"
+                await websocket.send_json(
+                    {
+                        "type": "response",
+                        "text": response_text,
+                        "has_errors": has_errors,
+                        "tone": tone,
+                        "tts_backend": backend_name,
+                    }
+                )
 
-                try:
-                    thread = threading.Thread(
-                        target=speak_pyttsx3, args=(response_text,), daemon=True
-                    )
-                    thread.start()
-                except RuntimeError:
-                    logger.info("TTS thread failed to start.")
+                if tts_backend is not None and tts_backend.name() == "silk":
+                    try:
+                        tts_backend.speak(response_text, tone=tone)
+                        await websocket.send_json({"type": "silk_end"})
+                    except NotImplementedError as exc:
+                        logger.info("Silk backend not active yet: %s", exc)
+                    except Exception as exc:
+                        logger.exception("Silk TTS failed: %s", exc)
+                        await websocket.send_json({"type": "silk_end"})
+                elif tts_backend is not None:
+                    try:
+                        thread = threading.Thread(
+                            target=tts_backend.speak,
+                            args=(response_text, tone),
+                            daemon=True,
+                        )
+                        thread.start()
+                    except RuntimeError:
+                        logger.info("TTS thread failed to start.")
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected.")
@@ -208,6 +254,7 @@ async def query_endpoint(request: QueryRequest) -> QueryResponse:
     """HTTP fallback endpoint for transcript queries."""
     global last_activity
 
-    response_text = await query_llm(request, get_config())
+    tone = resolve_tone(request.context)
+    response_text = await query_llm(request, get_config(), tone=tone)
     last_activity = datetime.now(timezone.utc)
     return QueryResponse(text=response_text, session_id=request.context.session_id)

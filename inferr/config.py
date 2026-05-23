@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Mapping, cast
 import tomllib
+
+from inferr.models import SilkConfig
 
 
 @dataclass(frozen=True)
@@ -15,6 +18,7 @@ class Config:
     ignored_dirs: list[str]
     host: str
     port: int
+    silk: SilkConfig
 
 
 _DEFAULT_TERMINAL_BUFFER_LINES = 50
@@ -36,6 +40,12 @@ def _default_toml() -> str:
         'ignored_dirs = ["node_modules", ".git", "__pycache__", ".venv"]\n'
         'host = "127.0.0.1"\n'
         "port = 7331\n"
+        "\n"
+        "[silk]\n"
+        'api_url = ""\n'
+        'api_key = ""\n'
+        'voice_id = "hinglish-dev-v1"\n'
+        "stream = true\n"
     )
 
 
@@ -80,6 +90,18 @@ def _coerce_str_list(value: object, default: list[str]) -> list[str]:
     return list(default)
 
 
+def _coerce_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
 def _ensure_config_file(path: Path) -> None:
     if path.exists():
         return
@@ -110,6 +132,30 @@ def load_config() -> Config:
     )
     host = _coerce_str(table.get("host"), _DEFAULT_HOST)
     port = _coerce_int(table.get("port"), _DEFAULT_PORT)
+    silk_table_obj = data.get("silk")
+    silk_table = (
+        cast(dict[object, object], silk_table_obj)
+        if isinstance(silk_table_obj, dict)
+        else {}
+    )
+    silk_api_url = _coerce_str(silk_table.get("api_url"), "")
+    silk_api_key = _coerce_str(silk_table.get("api_key"), "")
+    silk_voice_id = _coerce_str(silk_table.get("voice_id"), "hinglish-dev-v1")
+    silk_stream = _coerce_bool(silk_table.get("stream"), True)
+
+    env_silk_api_key = os.environ.get("SILK_API_KEY")
+    env_silk_api_url = os.environ.get("SILK_API_URL")
+    if isinstance(env_silk_api_key, str) and env_silk_api_key:
+        silk_api_key = env_silk_api_key
+    if isinstance(env_silk_api_url, str) and env_silk_api_url:
+        silk_api_url = env_silk_api_url
+
+    silk_config = SilkConfig(
+        api_url=silk_api_url,
+        api_key=silk_api_key,
+        voice_id=silk_voice_id,
+        stream=silk_stream,
+    )
 
     return Config(
         terminal_buffer_lines=terminal_buffer_lines,
@@ -119,4 +165,5 @@ def load_config() -> Config:
         ignored_dirs=ignored_dirs,
         host=host,
         port=port,
+        silk=silk_config,
     )

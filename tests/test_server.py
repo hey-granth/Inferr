@@ -12,6 +12,7 @@ def _reset_server_state() -> None:
     server_module.session_id = None
     server_module.context_assembler = None
     server_module.conversation_history = []
+    server_module.tts_backend = None
     server_module.last_activity = None
 
 

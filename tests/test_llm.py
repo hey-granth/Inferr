@@ -6,7 +6,7 @@ import pytest
 
 from inferr.config import Config
 from inferr.llm import build_system_prompt, query_llm
-from inferr.models import ContextObject, QueryRequest
+from inferr.models import ContextObject, QueryRequest, SilkConfig
 
 
 def test_build_system_prompt_hinglish() -> None:
@@ -65,6 +65,7 @@ async def test_query_llm_uses_model(monkeypatch: pytest.MonkeyPatch) -> None:
         ignored_dirs=[".git"],
         host="127.0.0.1",
         port=7331,
+        silk=SilkConfig(),
     )
 
     result = await query_llm(request, config)

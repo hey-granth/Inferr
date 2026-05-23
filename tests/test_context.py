@@ -10,6 +10,7 @@ from inferr.context import ContextAssembler
 from inferr.context.errors import extract_errors
 from inferr.context.history import read_shell_history
 from inferr.models import ActiveFile, ConversationTurn, FlaggedError
+from inferr.models import SilkConfig
 
 
 def test_read_shell_history_dedup(
@@ -62,9 +63,10 @@ def test_extract_errors_python_traceback() -> None:
 
     errors = extract_errors(lines)
 
-    assert len(errors) == 1
-    assert errors[0].type == "python_traceback"
-    assert "KeyError" in errors[0].summary
+    assert len(errors) == 2
+    assert errors[0].type == "marker"
+    assert errors[1].type == "python_traceback"
+    assert "KeyError" in errors[1].summary
 
 
 def test_extract_errors_none() -> None:
@@ -117,6 +119,7 @@ def test_context_assembler(monkeypatch: pytest.MonkeyPatch) -> None:
         ignored_dirs=[".git"],
         host="127.0.0.1",
         port=7331,
+        silk=SilkConfig(),
     )
 
     assembler = ContextAssembler(config)

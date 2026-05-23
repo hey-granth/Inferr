@@ -34,6 +34,13 @@ class ContextObject(BaseModel):
     timestamp: datetime
 
 
+class SilkConfig(BaseModel):
+    api_url: str = ""
+    api_key: str = ""
+    voice_id: str = "hinglish-dev-v1"
+    stream: bool = True
+
+
 class QueryRequest(BaseModel):
     transcript: str
     context: ContextObject
