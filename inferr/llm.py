@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from typing import Literal, cast
+
 from anthropic import APIError, AsyncAnthropic
+from anthropic.types import MessageParam
 
 from inferr.config import Config
 from inferr.models import QueryRequest
@@ -34,11 +37,16 @@ async def query_llm(request: QueryRequest, config: Config) -> str:
     context_json = request.context.model_dump_json()
     user_content = f"<context>\n{context_json}\n</context>\n\n{request.transcript}"
 
-    history_messages = [
-        {"role": turn.role, "content": turn.content}
+    def _as_message(role: Literal["user", "assistant"], content: str) -> MessageParam:
+        return cast(MessageParam, {"role": role, "content": content})
+
+    history_messages: list[MessageParam] = [
+        _as_message(turn.role, turn.content)
         for turn in request.context.conversation_history[-3:]
     ]
-    messages = history_messages + [{"role": "user", "content": user_content}]
+    messages: list[MessageParam] = history_messages + [
+        _as_message("user", user_content)
+    ]
 
     try:
         response = await client.messages.create(

@@ -31,10 +31,7 @@ class TerminalCapture:
             if not chunk:
                 continue
 
-            if isinstance(chunk, bytes):
-                text = chunk.decode("utf-8", errors="ignore")
-            else:
-                text = str(chunk)
+            text = chunk.decode("utf-8", errors="ignore")
 
             pending += text
             while "\n" in pending:

@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
+from inferr.config import Config
 import inferr.server as server_module
 
 
@@ -45,7 +46,7 @@ async def test_session_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
     _reset_server_state()
 
     class DummyAssembler:
-        def __init__(self, config):
+        def __init__(self, config: Config) -> None:
             self.started = False
 
         def start(self) -> None:

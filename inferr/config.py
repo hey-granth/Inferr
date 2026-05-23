@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Mapping, cast
 import tomllib
 
 
@@ -17,15 +17,13 @@ class Config:
     port: int
 
 
-_DEFAULTS: dict[str, Any] = {
-    "terminal_buffer_lines": 50,
-    "history_depth": 20,
-    "file_lines": 150,
-    "language": "hinglish",
-    "ignored_dirs": ["node_modules", ".git", "__pycache__", ".venv"],
-    "host": "127.0.0.1",
-    "port": 7331,
-}
+_DEFAULT_TERMINAL_BUFFER_LINES = 50
+_DEFAULT_HISTORY_DEPTH = 20
+_DEFAULT_FILE_LINES = 150
+_DEFAULT_LANGUAGE = "hinglish"
+_DEFAULT_IGNORED_DIRS = ["node_modules", ".git", "__pycache__", ".venv"]
+_DEFAULT_HOST = "127.0.0.1"
+_DEFAULT_PORT = 7331
 
 
 def _default_toml() -> str:
@@ -41,6 +39,47 @@ def _default_toml() -> str:
     )
 
 
+def _get_table(data: Mapping[str, object]) -> dict[str, object]:
+    table_obj = data.get("inferr")
+    if not isinstance(table_obj, dict):
+        return {}
+
+    raw_table = cast(dict[object, object], table_obj)
+    table: dict[str, object] = {}
+    for key, value in raw_table.items():
+        key_obj: object = key
+        value_obj: object = value
+        key_str = str(key_obj)
+        table[key_str] = value_obj
+    return table
+
+
+def _coerce_int(value: object, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _coerce_str(value: object, default: str) -> str:
+    if isinstance(value, str) and value:
+        return value
+    return default
+
+
+def _coerce_str_list(value: object, default: list[str]) -> list[str]:
+    if isinstance(value, list):
+        items = cast(list[object], value)
+        return [str(item) for item in items]
+    return list(default)
+
+
 def _ensure_config_file(path: Path) -> None:
     if path.exists():
         return
@@ -54,27 +93,23 @@ def load_config() -> Config:
 
     raw_text = config_path.read_text(encoding="utf-8")
     try:
-        data = tomllib.loads(raw_text)
+        data: dict[str, object] = tomllib.loads(raw_text)
     except tomllib.TOMLDecodeError as exc:
         raise RuntimeError(f"Invalid config TOML: {exc}") from exc
 
-    table = data.get("inferr", {})
-    if not isinstance(table, dict):
-        table = {}
+    table = _get_table(data)
 
-    terminal_buffer_lines = int(
-        table.get("terminal_buffer_lines", _DEFAULTS["terminal_buffer_lines"])
+    terminal_buffer_lines = _coerce_int(
+        table.get("terminal_buffer_lines"), _DEFAULT_TERMINAL_BUFFER_LINES
     )
-    history_depth = int(table.get("history_depth", _DEFAULTS["history_depth"]))
-    file_lines = int(table.get("file_lines", _DEFAULTS["file_lines"]))
-    language = str(table.get("language", _DEFAULTS["language"]))
-    ignored_dirs_raw = table.get("ignored_dirs", _DEFAULTS["ignored_dirs"])
-    if isinstance(ignored_dirs_raw, list):
-        ignored_dirs = [str(item) for item in ignored_dirs_raw]
-    else:
-        ignored_dirs = list(_DEFAULTS["ignored_dirs"])
-    host = str(table.get("host", _DEFAULTS["host"]))
-    port = int(table.get("port", _DEFAULTS["port"]))
+    history_depth = _coerce_int(table.get("history_depth"), _DEFAULT_HISTORY_DEPTH)
+    file_lines = _coerce_int(table.get("file_lines"), _DEFAULT_FILE_LINES)
+    language = _coerce_str(table.get("language"), _DEFAULT_LANGUAGE)
+    ignored_dirs = _coerce_str_list(
+        table.get("ignored_dirs"), _DEFAULT_IGNORED_DIRS
+    )
+    host = _coerce_str(table.get("host"), _DEFAULT_HOST)
+    port = _coerce_int(table.get("port"), _DEFAULT_PORT)
 
     return Config(
         terminal_buffer_lines=terminal_buffer_lines,

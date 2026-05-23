@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -8,10 +9,12 @@ from inferr.config import Config
 from inferr.context import ContextAssembler
 from inferr.context.errors import extract_errors
 from inferr.context.history import read_shell_history
-from inferr.models import ConversationTurn
+from inferr.models import ActiveFile, ConversationTurn, FlaggedError
 
 
-def test_read_shell_history_dedup(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_read_shell_history_dedup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("SHELL", "/bin/bash")
     history_path = tmp_path / ".bash_history"
@@ -22,7 +25,9 @@ def test_read_shell_history_dedup(monkeypatch: pytest.MonkeyPatch, tmp_path) -> 
     assert result == ["ls", "pwd", "echo hi"]
 
 
-def test_read_shell_history_zsh(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_read_shell_history_zsh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("SHELL", "/bin/zsh")
     history_path = tmp_path / ".zsh_history"
@@ -36,7 +41,9 @@ def test_read_shell_history_zsh(monkeypatch: pytest.MonkeyPatch, tmp_path) -> No
     assert result == ["git status", "ls"]
 
 
-def test_read_shell_history_missing(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_read_shell_history_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("SHELL", "/bin/bash")
 
@@ -88,13 +95,19 @@ def test_context_assembler(monkeypatch: pytest.MonkeyPatch) -> None:
         def stop(self) -> None:
             return
 
-        def get_active_file(self):
+        def get_active_file(self) -> ActiveFile | None:
             return None
+
+    def _fake_history(depth: int) -> list[str]:
+        return ["ls"]
+
+    def _fake_errors(lines: list[str]) -> list[FlaggedError]:
+        return []
 
     monkeypatch.setattr(context_module, "TerminalCapture", DummyTerminal)
     monkeypatch.setattr(context_module, "FileWatcher", DummyWatcher)
-    monkeypatch.setattr(context_module, "read_shell_history", lambda depth: ["ls"])
-    monkeypatch.setattr(context_module, "extract_errors", lambda lines: [])
+    monkeypatch.setattr(context_module, "read_shell_history", _fake_history)
+    monkeypatch.setattr(context_module, "extract_errors", _fake_errors)
 
     config = Config(
         terminal_buffer_lines=50,

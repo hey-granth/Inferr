@@ -26,6 +26,15 @@ _LANGUAGE_MAP: dict[str, str] = {
 }
 
 
+def _normalize_event_path(value: str | bytes) -> Path | None:
+    if isinstance(value, bytes):
+        try:
+            return Path(value.decode())
+        except UnicodeDecodeError:
+            return None
+    return Path(value)
+
+
 class _FileEventHandler(FileSystemEventHandler):
     def __init__(self, watcher: "FileWatcher") -> None:
         self._watcher = watcher
@@ -33,12 +42,18 @@ class _FileEventHandler(FileSystemEventHandler):
     def on_modified(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
-        self._watcher._process_path(Path(event.src_path))
+        path = _normalize_event_path(event.src_path)
+        if path is None:
+            return
+        self._watcher.process_path(path)
 
     def on_created(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
-        self._watcher._process_path(Path(event.src_path))
+        path = _normalize_event_path(event.src_path)
+        if path is None:
+            return
+        self._watcher.process_path(path)
 
 
 class FileWatcher:
@@ -51,7 +66,7 @@ class FileWatcher:
         self._root = Path.cwd()
         self._started = False
 
-    def _process_path(self, path: Path) -> None:
+    def process_path(self, path: Path) -> None:
         try:
             relative = path.relative_to(self._root)
         except ValueError:
@@ -70,7 +85,7 @@ class FileWatcher:
 
         try:
             with path.open("r", encoding="utf-8") as handle:
-                lines = []
+                lines: list[str] = []
                 for _ in range(self._config.file_lines):
                     line = handle.readline()
                     if not line:

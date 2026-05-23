@@ -34,7 +34,7 @@ async def test_query_llm_uses_model(monkeypatch: pytest.MonkeyPatch) -> None:
             self.content = [FakeBlock("ok")]
 
     class FakeMessages:
-        async def create(self, **kwargs):
+        async def create(self, **kwargs: object) -> FakeResponse:
             recorded.update(kwargs)
             return FakeResponse()
 
@@ -42,7 +42,10 @@ async def test_query_llm_uses_model(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self) -> None:
             self.messages = FakeMessages()
 
-    monkeypatch.setattr("inferr.llm.AsyncAnthropic", lambda: FakeClient())
+    def _fake_client() -> FakeClient:
+        return FakeClient()
+
+    monkeypatch.setattr("inferr.llm.AsyncAnthropic", _fake_client)
 
     context = ContextObject(
         terminal_buffer=["line"],
