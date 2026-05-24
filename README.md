@@ -29,6 +29,16 @@ Once installed, Inferr captures every command you run across all terminal window
 | `SILK_API_KEY` | TTS (Rumik) | playground.rumik.ai |
 | `DEEPGRAM_API_KEY` | STT | console.deepgram.com |
 
+## Development
+
+Install dev dependencies and run tests from the project virtualenv (not global/pipx `pytest`):
+
+```bash
+uv sync --extra dev
+uv run pytest
+# or: .venv/bin/pytest
+```
+
 ## Commands
 
 ```bash

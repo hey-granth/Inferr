@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 from collections import deque
 from typing import Deque
 
 from ptyprocess import PtyProcess
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9?]*[ -/]*[@-~]")
+
+
+def sanitize_terminal_line(line: str) -> str:
+    """Strip carriage returns and ANSI escapes so context text stays readable."""
+    cleaned = line.replace("\r", "")
+    cleaned = _ANSI_ESCAPE_RE.sub("", cleaned)
+    return cleaned.strip()
 
 
 class TerminalCapture:
@@ -39,7 +49,7 @@ class TerminalCapture:
                 self._append_line(line)
 
     def _append_line(self, line: str) -> None:
-        cleaned = line.strip()
+        cleaned = sanitize_terminal_line(line)
         if len(cleaned) < 3:
             return
         if cleaned.endswith("$") or cleaned.endswith("#") or cleaned.endswith("%"):

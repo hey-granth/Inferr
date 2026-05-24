@@ -36,6 +36,10 @@ class ContextAssembler:
         """Forward a shell-plugin captured line into the terminal buffer."""
         self._terminal.inject_line(line)
 
+    def hint_active_file_from_command(self, command: str) -> None:
+        """Try to resolve the active file from a captured shell command."""
+        self._file_watcher.hint_from_shell_command(command)
+
     def assemble(
         self, session_id: str, conversation_history: list[ConversationTurn]
     ) -> ContextObject:
@@ -53,6 +57,12 @@ class ContextAssembler:
         shell_history = plugin_commands if plugin_commands else file_history
 
         active_file = self._file_watcher.get_active_file()
+        if active_file is None and shell_history:
+            for command in reversed(shell_history):
+                self._file_watcher.hint_from_shell_command(command)
+                active_file = self._file_watcher.get_active_file()
+                if active_file is not None:
+                    break
 
         # Run error detection on both terminal buffer AND recent shell commands
         all_lines = terminal_buffer + plugin_commands

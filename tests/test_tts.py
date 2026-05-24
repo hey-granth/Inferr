@@ -87,10 +87,10 @@ def test_preprocess_bullet_to_spoken_english() -> None:
     assert output.startswith("Two things: ")
 
 
-def test_preprocess_truncates_at_800() -> None:
+def test_preprocess_truncates_for_spoken_length() -> None:
     output = _preprocess_tts_text("a" * 900, tone="neutral")
 
-    assert len(output) <= 810
+    assert len(output) <= 400
 
 
 def test_preprocess_tts_text_is_module_level() -> None:

@@ -8,6 +8,7 @@ from google import genai
 from google.genai import types as genai_types
 
 from inferr.config import Config
+from inferr.context.terminal import sanitize_terminal_line
 from inferr.models import QueryRequest
 from inferr.debug import debug_logger
 
@@ -67,8 +68,8 @@ def build_system_prompt(language: str, tone: str = "neutral") -> str:
         "- Do not use performative enthusiasm, filler phrases, or padding.\n"
         "- If evidence is weak or context is insufficient, say so in one short sentence.\n"
         "- Prioritize debugging and unblocking the developer's current coding task.\n"
-        "- Answer in 2–4 short sentences. Diagnosis first. Concrete next step second.\n"
-        "- Complete your response fully. Do not stop mid-sentence.\n"
+        "- Default to about 25 spoken words (1–3 short sentences) unless more detail is required.\n"
+        "- Diagnosis first. Concrete next step second. Complete every sentence naturally.\n"
         "- Prefer one complete concise thought over multiple fragmented ones.\n"
         "- Ground every answer in the observed terminal output, file, and error context.\n"
         "- If no relevant context is observed, answer directly from the question only."
@@ -99,8 +100,12 @@ def build_system_prompt(language: str, tone: str = "neutral") -> str:
     return prompt
 
 
+def _sanitize_context_line(value: str) -> str:
+    return sanitize_terminal_line(value)
+
+
 def _shorten_line(value: str, max_len: int = 120) -> str:
-    text = value.strip()
+    text = _sanitize_context_line(value)
     if len(text) <= max_len:
         return text
     return text[:max_len] + "..."
@@ -152,16 +157,22 @@ def _summarize_context(request: QueryRequest) -> str:
         sections.append("- none")
 
     if shell_commands:
-        sections.append("\nRecent commands:")
+        sections.append("Recent commands:")
         sections.extend([f"- {line}" for line in shell_commands])
 
-    if active_file:
-        sections.append(f"\nActive file: {active_file}")
-        
-    if repo_name:
-        sections.append(f"\nRepository: {repo_name}")
+    if context.active_file is not None:
+        af = context.active_file
+        sections.append(f"Active file: {active_file} ({af.language})")
+        preview = [_sanitize_context_line(line) for line in af.content.splitlines()[:12]]
+        preview = [line for line in preview if line]
+        if preview:
+            sections.append("Active file snippet:")
+            sections.extend([f"  {line}" for line in preview])
 
-    sections.append(f'\nUser said: "{request.transcript}"')
+    if repo_name:
+        sections.append(f"Repository: {repo_name}")
+
+    sections.append(f'User said: "{request.transcript}"')
     
     final_summary = "\n".join(sections)
     
@@ -200,7 +211,9 @@ async def query_llm(
 
     generate_config = genai_types.GenerateContentConfig(
         system_instruction=system_prompt,
-        max_output_tokens=1024, # Increased token limit to prevent mid-sentence truncation
+        # 200 tokens ≈ 150 words — enough for 3 clear sentences, prevents TTS buffer bloat.
+        # System prompt targets ~25 spoken words; this cap enforces that contract.
+        max_output_tokens=200,
         temperature=0.2,
     )
 

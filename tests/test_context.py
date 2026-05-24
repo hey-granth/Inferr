@@ -182,6 +182,65 @@ def test_file_watcher_ignores_ignored_dirs(tmp_path: Path) -> None:
     assert watcher.get_active_file() is None
 
 
+def test_sanitize_terminal_line_strips_carriage_return() -> None:
+    from inferr.context.terminal import sanitize_terminal_line
+
+    assert sanitize_terminal_line("foo\r") == "foo"
+    assert sanitize_terminal_line("\x1b[31merror\x1b[0m") == "error"
+
+
+def test_file_watcher_hint_from_shell_command(tmp_path: Path) -> None:
+    config = Config(
+        terminal_buffer_lines=50,
+        history_depth=20,
+        file_lines=150,
+        language="hinglish",
+        ignored_dirs=[".git"],
+        host="127.0.0.1",
+        port=7331,
+    )
+    watcher = FileWatcher(config)
+    watcher._root = tmp_path
+
+    py_file = tmp_path / "main.py"
+    py_file.write_text("x = 1\n", encoding="utf-8")
+
+    watcher.hint_from_shell_command("vim main.py")
+
+    active = watcher.get_active_file()
+    assert active is not None
+    assert active.path.endswith("main.py")
+
+
+def test_file_watcher_seed_recent_files(tmp_path: Path) -> None:
+    config = Config(
+        terminal_buffer_lines=50,
+        history_depth=20,
+        file_lines=150,
+        language="hinglish",
+        ignored_dirs=[".git"],
+        host="127.0.0.1",
+        port=7331,
+    )
+    watcher = FileWatcher(config)
+    watcher._root = tmp_path
+
+    older = tmp_path / "old.py"
+    newer = tmp_path / "new.py"
+    older.write_text("old\n", encoding="utf-8")
+    newer.write_text("new\n", encoding="utf-8")
+    import os
+    import time
+
+    os.utime(older, (time.time() - 10, time.time() - 10))
+    os.utime(newer, (time.time(), time.time()))
+
+    watcher.seed_recent_files()
+    active = watcher.get_active_file()
+    assert active is not None
+    assert "new" in active.content
+
+
 def test_file_watcher_detects_python_file(tmp_path: Path) -> None:
     config = Config(
         terminal_buffer_lines=50,
@@ -250,6 +309,9 @@ def test_context_assembler(monkeypatch: pytest.MonkeyPatch) -> None:
 
         def get_active_file(self) -> ActiveFile | None:
             return None
+
+        def hint_from_shell_command(self, command: str) -> None:
+            return
 
     def _fake_history(depth: int) -> list[str]:
         return ["ls"]

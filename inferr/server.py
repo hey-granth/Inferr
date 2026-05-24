@@ -163,6 +163,9 @@ async def browser_config() -> dict[str, object]:
     return {
         "deepgram_enabled": bool(cfg.deepgram.api_key),
         "tts_backend": tts_backend.name() if tts_backend else "browser",
+        "stt_sample_rate": 16000,
+        "stt_encoding": "linear16",
+        "stt_channels": 1,
     }
 
 
@@ -179,10 +182,18 @@ def resolve_tone(context: ContextObject) -> str:
 @app.websocket("/ws/stt")
 async def speech_to_text_endpoint(websocket: WebSocket) -> None:
     """Proxy browser microphone audio to Deepgram without exposing API keys."""
-    await websocket.accept()
+    client_host = websocket.client.host if websocket.client else "unknown"
+    logger.info("STT_CLIENT_CONNECTED client=%s", client_host)
+
+    try:
+        await websocket.accept()
+    except Exception as e:
+        logger.exception("STT_CLIENT_ACCEPT_FAILED client=%s error=%s", client_host, e)
+        return
 
     cfg = get_config()
     if not cfg.deepgram.api_key:
+        logger.error("STT_DEEPGRAM_NOT_CONFIGURED client=%s", client_host)
         await websocket.send_json(
             {"type": "error", "message": "Deepgram is not configured"}
         )
@@ -191,63 +202,117 @@ async def speech_to_text_endpoint(websocket: WebSocket) -> None:
 
     import websockets
 
+    # Browser streams raw PCM16 (linear16) from Web Audio — not MediaRecorder WebM.
+    stt_sample_rate = 16000
     deepgram_url = (
         "wss://api.deepgram.com/v1/listen"
         f"?model={cfg.deepgram.model}"
         f"&language={cfg.deepgram.language}"
         "&punctuate=true&interim_results=false&endpointing=500"
+        f"&encoding=linear16&sample_rate={stt_sample_rate}&channels=1"
     )
+    logger.info("DEEPGRAM_CONNECTING url=%s", deepgram_url)
 
     try:
-        async with websockets.connect(
+        deepgram_ws = await websockets.connect(
             deepgram_url,
             additional_headers={"Authorization": f"Token {cfg.deepgram.api_key}"},
-        ) as deepgram_ws:
+        )
+        logger.info("DEEPGRAM_CONNECTED client=%s", client_host)
 
-            async def browser_to_deepgram() -> None:
-                while True:
-                    message = await websocket.receive()
-                    message_type = message.get("type")
-                    if message_type == "websocket.disconnect":
-                        try:
-                            await deepgram_ws.send('{"type":"CloseStream"}')
-                        except Exception:
-                            return
-                        return
+        async def browser_to_deepgram() -> None:
+            while True:
+                message = await websocket.receive()
+                message_type = message.get("type")
+                logger.debug("STT_CLIENT_MESSAGE client=%s type=%s", client_host, message_type)
 
-                    payload_bytes = message.get("bytes")
-                    if isinstance(payload_bytes, bytes):
-                        await deepgram_ws.send(payload_bytes)
-                        continue
+                if message_type == "websocket.disconnect":
+                    logger.info("STT_CLIENT_DISCONNECTED client=%s", client_host)
+                    try:
+                        await deepgram_ws.send('{"type":"CloseStream"}')
+                        logger.debug("STT_CLOSE_STREAM_SENT client=%s", client_host)
+                    except Exception as e:
+                        logger.warning("STT_CLOSE_STREAM_FAILED client=%s error=%s", client_host, e)
+                    return
 
-                    payload_text = message.get("text")
-                    if isinstance(payload_text, str):
-                        await deepgram_ws.send(payload_text)
+                payload_bytes = message.get("bytes")
+                if isinstance(payload_bytes, bytes):
+                    chunk_size = len(payload_bytes)
+                    first_bytes_hex = payload_bytes[:16].hex() if payload_bytes else ""
+                    logger.info(
+                        "STT_CHUNK_META client=%s size=%d first_bytes=%s",
+                        client_host, chunk_size, first_bytes_hex
+                    )
+                    await deepgram_ws.send(payload_bytes)
+                    logger.debug("STT_CHUNK_SENT_TO_DEEPGRAM client=%s size=%d", client_host, chunk_size)
+                    continue
 
-            async def deepgram_to_browser() -> None:
+                payload_text = message.get("text")
+                if isinstance(payload_text, str):
+                    logger.info("STT_TEXT_MESSAGE client=%s text=%s", client_host, payload_text[:100])
+                    if payload_text.strip() == '{"type":"KeepAlive"}':
+                        logger.debug("STT_KEEPALIVE_RECEIVED client=%s", client_host)
+                    await deepgram_ws.send(payload_text)
+
+        async def deepgram_to_browser() -> None:
+            try:
                 async for message in deepgram_ws:
                     if isinstance(message, str):
-                        await websocket.send_text(message)
+                        logger.debug("DEEPGRAM_RAW_MESSAGE client=%s len=%d", client_host, len(message))
+                        try:
+                            import json
+                            msg_data = json.loads(message)
+                            msg_type = msg_data.get("type", "unknown")
+                            logger.info("DEEPGRAM_MESSAGE client=%s type=%s", client_host, msg_type)
 
-            browser_task = asyncio.create_task(browser_to_deepgram())
-            deepgram_task = asyncio.create_task(deepgram_to_browser())
+                            if msg_type == "Results":
+                                is_final = msg_data.get("is_final", False)
+                                transcript = msg_data.get("channel", {}).get("alternatives", [{}])[0].get("transcript", "")
+                                if transcript:
+                                    logger.info(
+                                        "DEEPGRAM_TRANSCRIPT client=%s is_final=%s transcript=%s",
+                                        client_host, is_final, transcript[:100]
+                                    )
+                            elif msg_type == "error":
+                                error_msg = msg_data.get("error", "unknown")
+                                logger.error("DEEPGRAM_ERROR client=%s error=%s", client_host, error_msg)
+                        except json.JSONDecodeError:
+                            logger.warning("DEEPGRAM_INVALID_JSON client=%s len=%d", client_host, len(message))
+
+                        await websocket.send_text(message)
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.info("DEEPGRAM_CONNECTION_CLOSED client=%s code=%s reason=%s",
+                           client_host, e.code, e.reason)
+            except Exception as e:
+                logger.exception("DEEPGRAM_TO_BROWSER_FAILED client=%s error=%s", client_host, e)
+
+        browser_task = asyncio.create_task(browser_to_deepgram())
+        deepgram_task = asyncio.create_task(deepgram_to_browser())
+
+        try:
             done, pending = await asyncio.wait(
                 {browser_task, deepgram_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
                 task.cancel()
+                logger.debug("STT_TASK_CANCELLED client=%s task=%s", client_host, task)
             for task in done:
                 exc = task.exception()
                 if exc is not None:
+                    logger.exception("STT_TASK_FAILED client=%s error=%s", client_host, exc)
                     raise exc
+        except asyncio.CancelledError:
+            logger.info("STT_TASKS_CANCELLED client=%s", client_host)
+
     except WebSocketDisconnect:
-        logger.info("STT WebSocket disconnected.")
+        logger.info("STT_WEBSOCKET_DISCONNECTED client=%s", client_host)
     except Exception as exc:
-        logger.exception("Deepgram STT proxy failed: %s", exc)
+        logger.exception("STT_WEBSOCKET_FAILURE client=%s error=%s", client_host, exc)
         try:
             await websocket.send_json({"type": "error", "message": str(exc)})
         except RuntimeError:
+            logger.warning("STT_ERROR_SEND_FAILED client=%s", client_host)
             return
         await websocket.close(code=1011)
 
@@ -419,6 +484,7 @@ async def capture_command(payload: ShellCommandCapture) -> dict[str, str]:
     # Also inject into active session's terminal buffer for error detection
     if context_assembler is not None:
         context_assembler.inject_command(entry)
+        context_assembler.hint_active_file_from_command(payload.command)
 
     return {"status": "ok"}
 

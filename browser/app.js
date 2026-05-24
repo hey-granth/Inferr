@@ -19,9 +19,10 @@ let shouldReconnect = true;
 
 let deepgramEnabled = false;
 let deepgramSocket = null;
-let mediaRecorder = null;
 let keepAliveInterval = null;
+let sttSampleRate = 16000;
 let micActive = false;
+let _micStarting = false;  // Guard: prevents duplicate startMic() calls
 let micStream = null;
 let silkAudioContext = null;
 let silkAnalyser = null;
@@ -31,6 +32,10 @@ let silkChunkBytes = 0;
 let silkFirstChunkAt = null;
 let silkResponseStartedAt = null;
 
+// Self-transcription guard: while the assistant is speaking, suppress incoming
+// Deepgram transcripts so the assistant doesn't hear and respond to its own voice.
+let assistantSpeaking = false;
+
 // Progressive Silk audio player — plays each PCM chunk as it arrives
 // instead of waiting for the full response before playback begins.
 const silkPlayer = (() => {
@@ -38,7 +43,12 @@ const silkPlayer = (() => {
     let _nextStartTime = 0;
     let _analyser = null;
     let _levelRaf = null;
+    let _activeSources = 0;
+    let _finalizePending = false;
     const SAMPLE_RATE = 24000;
+    // Tail padding so the last PCM frame clears the analyser/output node.
+    // Increased to 0.7s to prevent final-word cutoff on slower systems.
+    const OUTPUT_TAIL_SEC = 0.7;
 
     function _ensureContext() {
         if (!_ctx || _ctx.state === "closed") {
@@ -77,6 +87,18 @@ const silkPlayer = (() => {
         }
     }
 
+    function _maybePlaybackIdle() {
+        if (!_ctx || _activeSources > 0) {
+            return;
+        }
+        if (_ctx.currentTime + 0.02 < _nextStartTime) {
+            return;
+        }
+        setSpeaking(false);
+        _stopLevelMonitor();
+        document.dispatchEvent(new CustomEvent("silkPlaybackEnd"));
+    }
+
     return {
         // Feed a raw PCM-16LE Uint8Array chunk — schedules it for gapless playback
         pushChunk(chunk) {
@@ -99,16 +121,15 @@ const silkPlayer = (() => {
             const startAt = Math.max(_ctx.currentTime + 0.01, _nextStartTime);
             source.start(startAt);
             _nextStartTime = startAt + audioBuffer.duration;
+            _activeSources += 1;
 
             setSpeaking(true);
             _startLevelMonitor();
 
             source.onended = () => {
-                // Only signal end if nothing else is queued after this chunk
-                if (_ctx && _ctx.currentTime >= _nextStartTime - 0.05) {
-                    setSpeaking(false);
-                    _stopLevelMonitor();
-                    document.dispatchEvent(new CustomEvent("silkPlaybackEnd"));
+                _activeSources = Math.max(0, _activeSources - 1);
+                if (!_finalizePending) {
+                    _maybePlaybackIdle();
                 }
             };
         },
@@ -116,21 +137,38 @@ const silkPlayer = (() => {
         // Call when silk_end received: close the AudioContext after playback drains
         finalize() {
             if (!_ctx) return;
-            const drainDelay = Math.max(0, _nextStartTime - _ctx.currentTime) + 0.15;
-            window.setTimeout(() => {
-                _stopLevelMonitor();
-                if (_ctx && _ctx.state !== "closed") {
-                    void _ctx.close();
+            _finalizePending = true;
+            const ctx = _ctx;
+            const scheduledEnd = _nextStartTime;
+            const drainDelay =
+                Math.max(0, scheduledEnd - ctx.currentTime) + OUTPUT_TAIL_SEC;
+
+            const finish = () => {
+                if (_activeSources > 0) {
+                    window.setTimeout(finish, 50);
+                    return;
                 }
-                _ctx = null;
-                _analyser = null;
-                _nextStartTime = 0;
+                _stopLevelMonitor();
+                if (ctx.state !== "closed") {
+                    void ctx.close();
+                }
+                if (_ctx === ctx) {
+                    _ctx = null;
+                    _analyser = null;
+                    _nextStartTime = 0;
+                }
+                _finalizePending = false;
                 setSpeaking(false);
-            }, drainDelay * 1000);
+                document.dispatchEvent(new CustomEvent("silkPlaybackEnd"));
+            };
+
+            window.setTimeout(finish, drainDelay * 1000);
         },
 
         // Hard reset on new utterance
         reset() {
+            _finalizePending = false;
+            _activeSources = 0;
             _stopLevelMonitor();
             if (_ctx && _ctx.state !== "closed") {
                 void _ctx.close();
@@ -258,6 +296,9 @@ async function loadBrowserConfig() {
         const res = await fetch("/config/browser");
         const cfg = await res.json();
         deepgramEnabled = cfg.deepgram_enabled === true;
+        if (cfg.stt_sample_rate) {
+            sttSampleRate = Number(cfg.stt_sample_rate) || 16000;
+        }
         if (cfg.tts_backend) {
             setTtsBackend(cfg.tts_backend);
         }
@@ -283,13 +324,23 @@ function speakInBrowser(text) {
         audioLevel = 0.05;
         utterance.onend = () => {
             setSpeaking(false);
+            // Browser TTS finished — re-enable transcript processing
+            if (assistantSpeaking) {
+                assistantSpeaking = false;
+                console.log("[STT] assistantSpeaking cleared — browser TTS ended");
+            }
         };
         utterance.onerror = () => {
             setSpeaking(false);
+            if (assistantSpeaking) {
+                assistantSpeaking = false;
+                console.log("[STT] assistantSpeaking cleared — browser TTS error");
+            }
         };
         window.speechSynthesis.speak(utterance);
     } catch (err) {
         setSpeaking(false);
+        assistantSpeaking = false;
     }
 }
 
@@ -331,12 +382,17 @@ function handleTextMessage(payload) {
 
         // Reset player for new utterance before chunks begin arriving
         if (backend === "silk") {
+            // Set guard BEFORE playback begins so Deepgram transcripts are suppressed
+            assistantSpeaking = true;
+            console.log("[STT] assistantSpeaking = true (silk TTS starting)");
             silkPlayer.reset();
             silkChunkCount = 0;
             silkChunkBytes = 0;
             silkFirstChunkAt = null;
             silkResponseStartedAt = Date.now();
         } else if (backend === "browser") {
+            assistantSpeaking = true;
+            console.log("[STT] assistantSpeaking = true (browser TTS starting)");
             speakInBrowser(text);
         }
     }
@@ -419,48 +475,213 @@ function sendTranscript(text) {
     ws.send(JSON.stringify({ type: "transcript", payload: trimmed }));
 }
 
+const STT_BUFFER_SIZE = 4096;
+let sttAudioContext = null;
+let sttSourceNode = null;
+let sttProcessorNode = null;
+let sttSilentGain = null;
+let sttCaptureRate = 16000;
+let sttFramesSent = 0;
+let sttLastPcmLogAt = 0;
+
+function float32ToPcm16(float32Array) {
+    const pcm16 = new Int16Array(float32Array.length);
+    for (let i = 0; i < float32Array.length; i++) {
+        const clamped = Math.max(-1, Math.min(1, float32Array[i]));
+        pcm16[i] = clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767);
+    }
+    return pcm16.buffer;
+}
+
+function downsampleToSttRate(input, inputRate, outputRate) {
+    if (inputRate === outputRate) {
+        return input;
+    }
+    const ratio = inputRate / outputRate;
+    const outputLength = Math.floor(input.length / ratio);
+    const output = new Float32Array(outputLength);
+    for (let i = 0; i < outputLength; i++) {
+        output[i] = input[Math.floor(i * ratio)];
+    }
+    return output;
+}
+
+function handleDeepgramMessage(data) {
+    if (data.type && data.type !== "Results") {
+        console.log("[STT] Deepgram event:", data.type);
+    }
+
+    if (data.type !== "Results") {
+        if (data.type === "error" && data.message) {
+            console.error("[STT] Deepgram error:", data.message);
+            addExchange("", String(data.message), true);
+            stopMic();
+        }
+        return;
+    }
+
+    const transcript = data.channel?.alternatives?.[0]?.transcript?.trim() || "";
+    const isFinal = data.is_final === true;
+    const speechFinal = data.speech_final === true;
+
+    console.log(
+        "[STT] Results — is_final:", isFinal,
+        "| speech_final:", speechFinal,
+        "| transcript:", transcript || "(empty)"
+    );
+
+    if (!speechFinal || !transcript) {
+        if (isFinal && transcript) {
+            console.log("[STT] is_final (intermediate) — waiting for speech_final");
+        }
+        return;
+    }
+
+    if (assistantSpeaking) {
+        console.log("[STT] Transcript SUPPRESSED — assistant is speaking");
+        return;
+    }
+
+    console.log("[STT] speech_final → invoking assistant:", transcript);
+    sendTranscript(transcript);
+}
+
 async function startMic() {
     if (!deepgramEnabled) {
         return;
     }
+    if (micActive || _micStarting) {
+        console.warn("[STT] startMic() ignored — session already active or starting");
+        return;
+    }
+    _micStarting = true;
+
+    console.log("[STT] Requesting microphone access (PCM16 pipeline)");
 
     let stream;
     try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+            },
+        });
+        console.log("[STT] Microphone access granted");
     } catch (error) {
-        voiceWarning.textContent = "Microphone access denied.";
+        console.error("[STT] Microphone access denied:", error.name, error.message);
+        voiceWarning.textContent = "Microphone access denied: " + (error.message || error.name);
         voiceWarning.classList.remove("hidden");
+        _micStarting = false;
         return;
     }
     micStream = stream;
 
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
     const sttUrl = `${scheme}://${window.location.host}/ws/stt`;
+    console.log("[STT] Connecting to", sttUrl, "| target PCM rate:", sttSampleRate);
     deepgramSocket = new WebSocket(sttUrl);
     deepgramSocket.binaryType = "arraybuffer";
 
-    deepgramSocket.onopen = () => {
+    deepgramSocket.onopen = async () => {
+        console.log("[STT] WebSocket /ws/stt opened — starting PCM16 capture");
         micActive = true;
+        _micStarting = false;
         micBtn.classList.add("listening");
+        sttFramesSent = 0;
 
-        try {
-            mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-        } catch (error) {
-            mediaRecorder = new MediaRecorder(stream);
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) {
+            console.error("[STT] Web Audio API not available");
+            stopMic();
+            return;
         }
 
-        mediaRecorder.addEventListener("dataavailable", (event) => {
-            if (event.data.size > 0 && deepgramSocket.readyState === WebSocket.OPEN) {
-                deepgramSocket.send(event.data);
+        try {
+            sttAudioContext = new AudioContextClass({ sampleRate: sttSampleRate });
+        } catch (error) {
+            console.warn("[STT] Could not create AudioContext at", sttSampleRate, "— using default:", error);
+            sttAudioContext = new AudioContextClass();
+        }
+
+        sttCaptureRate = sttAudioContext.sampleRate;
+        if (sttCaptureRate !== sttSampleRate) {
+            console.warn(
+                "[STT] AudioContext rate", sttCaptureRate,
+                "≠ Deepgram rate", sttSampleRate, "— downsampling in capture"
+            );
+        }
+
+        try {
+            await sttAudioContext.resume();
+        } catch (error) {
+            console.warn("[STT] AudioContext.resume failed:", error);
+        }
+
+        sttSourceNode = sttAudioContext.createMediaStreamSource(stream);
+        sttProcessorNode = sttAudioContext.createScriptProcessor(STT_BUFFER_SIZE, 1, 1);
+        sttSilentGain = sttAudioContext.createGain();
+        sttSilentGain.gain.value = 0;
+
+        sttProcessorNode.onaudioprocess = (audioEvent) => {
+            if (!micActive) {
+                return;
             }
-        });
-        mediaRecorder.start(250);
+            if (assistantSpeaking) {
+                return;
+            }
+
+            let samples = audioEvent.inputBuffer.getChannelData(0);
+            if (sttCaptureRate !== sttSampleRate) {
+                samples = downsampleToSttRate(samples, sttCaptureRate, sttSampleRate);
+            }
+
+            let sumSq = 0;
+            for (let i = 0; i < samples.length; i++) {
+                sumSq += samples[i] * samples[i];
+            }
+            const rms = Math.sqrt(sumSq / Math.max(samples.length, 1));
+            audioLevel = Math.min(0.35, rms * 4);
+
+            const pcmBuffer = float32ToPcm16(samples);
+            if (!deepgramSocket || deepgramSocket.readyState !== WebSocket.OPEN) {
+                return;
+            }
+
+            deepgramSocket.send(pcmBuffer);
+            sttFramesSent += 1;
+
+            const now = Date.now();
+            if (now - sttLastPcmLogAt >= 2000) {
+                sttLastPcmLogAt = now;
+                console.log("[STT] PCM streaming", {
+                    frameBytes: pcmBuffer.byteLength,
+                    framesSent: sttFramesSent,
+                    captureRate: sttCaptureRate,
+                    deepgramRate: sttSampleRate,
+                    rms: rms.toFixed(4),
+                });
+            }
+        };
+
+        sttSourceNode.connect(sttProcessorNode);
+        sttProcessorNode.connect(sttSilentGain);
+        sttSilentGain.connect(sttAudioContext.destination);
 
         keepAliveInterval = window.setInterval(() => {
             if (deepgramSocket && deepgramSocket.readyState === WebSocket.OPEN) {
                 deepgramSocket.send(JSON.stringify({ type: "KeepAlive" }));
+                console.log("[STT] KeepAlive sent");
             }
         }, 8000);
+
+        console.log("[STT] PCM16 pipeline active", {
+            encoding: "linear16",
+            deepgramSampleRate: sttSampleRate,
+            captureSampleRate: sttCaptureRate,
+            bufferSamples: STT_BUFFER_SIZE,
+        });
     };
 
     deepgramSocket.onmessage = (event) => {
@@ -473,63 +694,105 @@ async function startMic() {
         } catch {
             return;
         }
-
-        if (
-            data.type === "Results" &&
-            data.is_final === true &&
-            data.channel?.alternatives?.[0]?.transcript
-        ) {
-            const transcript = data.channel.alternatives[0].transcript.trim();
-            if (transcript) {
-                sendTranscript(transcript);
-                stopMic();
-            }
-            return;
-        }
-
-        if (data.type === "error" && data.message) {
-            addExchange("", String(data.message), true);
-            stopMic();
-        }
+        handleDeepgramMessage(data);
     };
 
-    deepgramSocket.onerror = () => stopMic();
-    deepgramSocket.onclose = () => {
+    deepgramSocket.onerror = (event) => {
+        console.error("[STT] WebSocket error:", event);
+        _micStarting = false;
+        addExchange("", "Microphone connection error. Check console.", true);
+        stopMic();
+    };
+
+    deepgramSocket.onclose = (event) => {
+        console.log("[STT] WebSocket closed — code:", event.code, "reason:", event.reason || "(none)");
+        _micStarting = false;
         micActive = false;
         micBtn.classList.remove("listening");
     };
 }
 
 function stopMic() {
-    if (mediaRecorder && mediaRecorder.state !== "inactive") {
-        mediaRecorder.stop();
-        mediaRecorder.stream.getTracks().forEach((track) => track.stop());
-    } else if (micStream) {
-        micStream.getTracks().forEach((track) => track.stop());
+    console.log("[STT] stopMic() called");
+    micActive = false;
+    _micStarting = false;
+    micBtn.classList.remove("listening");
+
+    if (sttProcessorNode) {
+        try {
+            sttProcessorNode.disconnect();
+        } catch (error) {
+            console.warn("[STT] processor disconnect:", error);
+        }
+        sttProcessorNode.onaudioprocess = null;
+        sttProcessorNode = null;
     }
+    if (sttSourceNode) {
+        try {
+            sttSourceNode.disconnect();
+        } catch (error) {
+            console.warn("[STT] source disconnect:", error);
+        }
+        sttSourceNode = null;
+    }
+    if (sttSilentGain) {
+        try {
+            sttSilentGain.disconnect();
+        } catch (error) {
+            console.warn("[STT] gain disconnect:", error);
+        }
+        sttSilentGain = null;
+    }
+    if (sttAudioContext && sttAudioContext.state !== "closed") {
+        void sttAudioContext.close().catch((error) => {
+            console.warn("[STT] AudioContext close:", error);
+        });
+        sttAudioContext = null;
+    }
+
+    if (micStream) {
+        micStream.getTracks().forEach((track) => track.stop());
+        micStream = null;
+    }
+
     if (keepAliveInterval !== null) {
         clearInterval(keepAliveInterval);
         keepAliveInterval = null;
     }
+
     if (deepgramSocket) {
         if (deepgramSocket.readyState === WebSocket.OPEN) {
-            deepgramSocket.send(JSON.stringify({ type: "CloseStream" }));
+            try {
+                deepgramSocket.send(JSON.stringify({ type: "CloseStream" }));
+            } catch (error) {
+                console.warn("[STT] CloseStream send failed:", error);
+            }
         }
-        if (deepgramSocket.readyState === WebSocket.OPEN || deepgramSocket.readyState === WebSocket.CONNECTING) {
-            deepgramSocket.close();
+        if (
+            deepgramSocket.readyState === WebSocket.OPEN ||
+            deepgramSocket.readyState === WebSocket.CONNECTING
+        ) {
+            try {
+                deepgramSocket.close();
+            } catch (error) {
+                console.warn("[STT] socket close:", error);
+            }
         }
+        deepgramSocket = null;
     }
-    micActive = false;
-    micBtn.classList.remove("listening");
-    mediaRecorder = null;
-    deepgramSocket = null;
-    micStream = null;
+
+    sttFramesSent = 0;
+    console.log("[STT] stopMic() complete");
 }
 
 micBtn.addEventListener("click", () => {
-    if (micActive) {
+    if (micActive || _micStarting) {
+        // User explicitly disabling the conversation session
+        console.log("[STT] User disabled mic — ending conversational session");
         stopMic();
     } else {
+        // User enabling ambient conversational mode
+        console.log("[STT] User enabled mic — starting conversational session");
         void startMic();
     }
 });
@@ -556,6 +819,12 @@ typedInput.addEventListener("input", () => {
 
 document.addEventListener("silkPlaybackEnd", () => {
     setSpeaking(false);
+    // Re-enable transcript processing now that assistant has finished speaking.
+    // This clears the self-transcription guard set when TTS playback began.
+    if (assistantSpeaking) {
+        assistantSpeaking = false;
+        console.log("[STT] assistantSpeaking cleared — mic listening resumed after TTS");
+    }
     if (silkFirstChunkAt !== null) {
         const playbackMs = Date.now() - silkFirstChunkAt;
         console.info("[inferr] silkPlaybackEnd", {

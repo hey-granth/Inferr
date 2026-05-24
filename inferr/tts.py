@@ -14,7 +14,8 @@ from inferr.models import SilkConfig
 from inferr.debug import debug_logger
 
 _VALID_TONES = {"neutral", "urgent", "warm"}
-_TTS_TRUNCATE_LIMIT = 800
+# ~25 spoken words at conversational pace — keeps Silk synthesis fast.
+_TTS_TRUNCATE_LIMIT = 380
 _HINGLISH_HINTS = {
     "bhai",
     "yaar",
