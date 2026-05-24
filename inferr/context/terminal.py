@@ -51,6 +51,10 @@ class TerminalCapture:
         with self._lock:
             return list(self._buffer)
 
+    def inject_line(self, line: str) -> None:
+        """Inject a line from an external source (shell plugin, log file, etc.)"""
+        self._append_line(line)
+
     def write(self, data: str) -> None:
         try:
             self._process.write(data.encode("utf-8"))

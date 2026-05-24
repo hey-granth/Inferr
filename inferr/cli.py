@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import os
+from pathlib import Path
 import threading
 import time
 from typing import Optional
@@ -168,3 +169,46 @@ def logs(n: Optional[int]) -> None:
         click.echo("Inferr is not running. Start it with `inferr start`.")
     except httpx.HTTPError:
         click.echo("Failed to fetch logs.")
+
+
+@cli.command("install-shell")
+@click.option("--shell", "shell_name", type=click.Choice(["zsh", "bash"]), default=None)
+def install_shell(shell_name: Optional[str]) -> None:
+    """Install the Inferr shell integration plugin."""
+    import shutil
+
+    detected = os.environ.get("SHELL", "")
+    if shell_name is None:
+        if "zsh" in detected:
+            shell_name = "zsh"
+        elif "bash" in detected:
+            shell_name = "bash"
+        else:
+            click.echo("Could not detect shell. Use --shell zsh or --shell bash.")
+            raise SystemExit(1)
+
+    plugin_src = Path(__file__).resolve().parent / "shell" / f"inferr.{shell_name}"
+    if not plugin_src.exists():
+        click.echo(f"Plugin file not found: {plugin_src}")
+        raise SystemExit(1)
+
+    inferr_dir = Path.home() / ".inferr"
+    inferr_dir.mkdir(parents=True, exist_ok=True)
+    dest = inferr_dir / f"inferr.{shell_name}"
+    shutil.copy(plugin_src, dest)
+
+    rc_file = Path.home() / (f".{shell_name}rc")
+    source_line = f'\nsource "{dest}"  # inferr shell integration\n'
+
+    if rc_file.exists():
+        content = rc_file.read_text(encoding="utf-8")
+        if str(dest) in content:
+            click.echo(f"Already installed in {rc_file}.")
+            return
+        rc_file.write_text(content + source_line, encoding="utf-8")
+    else:
+        rc_file.write_text(source_line, encoding="utf-8")
+
+    click.echo(f"Installed inferr shell plugin to {rc_file}.")
+    click.echo(f"Run: source {rc_file}")
+

@@ -8,6 +8,7 @@ from inferr.config import Config
 from inferr.llm import build_system_prompt, query_llm
 from inferr.models import (
     ContextObject,
+    DeepgramConfig,
     ElevenLabsConfig,
     GeminiConfig,
     QueryRequest,
@@ -54,7 +55,8 @@ def _base_config() -> Config:
         port=7331,
         silk=SilkConfig(),
         elevenlabs=ElevenLabsConfig(),
-        gemini=GeminiConfig(api_key="test-key", model="gemini-2.0-flash"),
+        gemini=GeminiConfig(api_key="test-key", model="gemini-flash-latest"),
+        deepgram=DeepgramConfig(),
     )
 
 
@@ -78,19 +80,15 @@ async def test_query_llm_uses_correct_model(monkeypatch: pytest.MonkeyPatch) -> 
         def __init__(self, text: str) -> None:
             self.candidates = [FakeCandidate(text)]
 
-    class FakeAioModels:
-        async def generate_content(self, **kwargs: object) -> FakeResponse:
+    class FakeModels:
+        def generate_content(self, **kwargs: object) -> FakeResponse:
             recorded.update(kwargs)
             return FakeResponse("ok")
-
-    class FakeAio:
-        def __init__(self) -> None:
-            self.models = FakeAioModels()
 
     class FakeClient:
         def __init__(self, api_key: str) -> None:
             self.api_key = api_key
-            self.aio = FakeAio()
+            self.models = FakeModels()
 
     monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
 
@@ -98,7 +96,7 @@ async def test_query_llm_uses_correct_model(monkeypatch: pytest.MonkeyPatch) -> 
     result = await query_llm(request, _base_config())
 
     assert result == "ok"
-    assert recorded.get("model") == "gemini-2.0-flash"
+    assert recorded.get("model") == "gemini-flash-latest"
 
 
 @pytest.mark.asyncio
@@ -121,18 +119,14 @@ async def test_query_llm_injects_context_json(monkeypatch: pytest.MonkeyPatch) -
         def __init__(self, text: str) -> None:
             self.candidates = [FakeCandidate(text)]
 
-    class FakeAioModels:
-        async def generate_content(self, **kwargs: object) -> FakeResponse:
+    class FakeModels:
+        def generate_content(self, **kwargs: object) -> FakeResponse:
             recorded.update(kwargs)
             return FakeResponse("ok")
 
-    class FakeAio:
-        def __init__(self) -> None:
-            self.models = FakeAioModels()
-
     class FakeClient:
         def __init__(self, api_key: str) -> None:
-            self.aio = FakeAio()
+            self.models = FakeModels()
 
     monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
 
@@ -151,17 +145,13 @@ async def test_query_llm_injects_context_json(monkeypatch: pytest.MonkeyPatch) -
 async def test_query_llm_raises_runtime_error_on_api_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeAioModels:
-        async def generate_content(self, **kwargs: object) -> object:
+    class FakeModels:
+        def generate_content(self, **kwargs: object) -> object:
             raise Exception("quota exceeded")
-
-    class FakeAio:
-        def __init__(self) -> None:
-            self.models = FakeAioModels()
 
     class FakeClient:
         def __init__(self, api_key: str) -> None:
-            self.aio = FakeAio()
+            self.models = FakeModels()
 
     monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
 
@@ -179,17 +169,13 @@ async def test_query_llm_returns_empty_on_no_candidates(
         def __init__(self) -> None:
             self.candidates: list[object] = []
 
-    class FakeAioModels:
-        async def generate_content(self, **kwargs: object) -> FakeResponse:
+    class FakeModels:
+        def generate_content(self, **kwargs: object) -> FakeResponse:
             return FakeResponse()
-
-    class FakeAio:
-        def __init__(self) -> None:
-            self.models = FakeAioModels()
 
     class FakeClient:
         def __init__(self, api_key: str) -> None:
-            self.aio = FakeAio()
+            self.models = FakeModels()
 
     monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
 
@@ -221,18 +207,14 @@ async def test_query_llm_history_uses_model_role(
         def __init__(self, text: str) -> None:
             self.candidates = [FakeCandidate(text)]
 
-    class FakeAioModels:
-        async def generate_content(self, **kwargs: object) -> FakeResponse:
+    class FakeModels:
+        def generate_content(self, **kwargs: object) -> FakeResponse:
             recorded.update(kwargs)
             return FakeResponse("ok")
 
-    class FakeAio:
-        def __init__(self) -> None:
-            self.models = FakeAioModels()
-
     class FakeClient:
         def __init__(self, api_key: str) -> None:
-            self.aio = FakeAio()
+            self.models = FakeModels()
 
     monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
 

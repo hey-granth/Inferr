@@ -1,60 +1,49 @@
 # Inferr
 
-Inferr is a voice-native ambient pair programming companion. Phase 0 provides an end-to-end loop: speech in the browser, context assembly in the backend, and a response from Claude that is spoken back via browser SpeechSynthesis (and a server-side pyttsx3 stub).
+Voice-native ambient pair programming companion. Ask questions out loud, in Hinglish.
+Inferr already knows what's on your screen.
 
-## Requirements
-
-- Python 3.11+
-- `uv` for dependency management
-- A valid `ANTHROPIC_API_KEY` environment variable
-
-## Install
+## Setup
 
 ```bash
-uv pip install -e .
-```
-
-## Quick Start
-
-```bash
+pip install inferr
+cp .env.example .env
+# Add your API keys to .env
 inferr start
 ```
 
-This launches the FastAPI server (default: `http://127.0.0.1:7331`) and opens the companion UI in your browser.
-
-## CLI
+## Shell integration (recommended)
 
 ```bash
-inferr start [--host TEXT] [--port INTEGER] [--no-browser] [--lang TEXT]
-inferr stop
-inferr status
-inferr logs [--n INTEGER]
+inferr install-shell
+source ~/.zshrc   # or ~/.bashrc
 ```
 
-## Configuration
+Once installed, Inferr captures every command you run across all terminal windows.
 
-Configuration is read from `~/.inferr/config.toml`. If the file does not exist, Inferr creates it with defaults.
+## API keys required
 
-```toml
-[inferr]
-terminal_buffer_lines = 50
-history_depth = 20
-file_lines = 150
-language = "hinglish"
-ignored_dirs = ["node_modules", ".git", "__pycache__", ".venv"]
-host = "127.0.0.1"
-port = 7331
-```
+| Key | Purpose | Get it |
+|-----|---------|--------|
+| `GEMINI_API_KEY` | LLM | aistudio.google.com |
+| `SILK_API_KEY` | TTS (Rumik) | playground.rumik.ai |
+| `DEEPGRAM_API_KEY` | STT | console.deepgram.com |
 
-## Environment Variables
-
-- `ANTHROPIC_API_KEY`: required for Anthropic API access.
-- `INFERR_NO_BROWSER`: if set to "1", skip `xdg-open` when starting a session.
-- `INFERR_PORT`: optional override for the server port.
-
-## Development
+## Commands
 
 ```bash
-mypy --strict inferr/
-pytest tests/
+inferr start              # Start server + open browser UI
+inferr stop               # Stop session
+inferr status             # Check if running
+inferr logs               # Show recent context
+inferr install-shell      # Install shell integration
 ```
+
+## Demo scenario
+
+1. `inferr start`
+2. `inferr install-shell && source ~/.zshrc`
+3. Run a FastAPI app with a KeyError bug
+4. Hit the endpoint: `curl -X POST http://localhost:8000/user -d '{"userId":"123"}'`
+5. Ask Inferr: "yaar ye error kyu aa raha hai"
+6. Inferr responds in Hinglish with the file, line number, and fix

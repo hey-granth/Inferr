@@ -73,3 +73,8 @@ class QueryResponse(BaseModel):
 class WebSocketMessage(BaseModel):
     type: Literal["transcript", "ping"]
     payload: str
+
+
+class ShellCommandCapture(BaseModel):
+    command: str
+    exit_code: int = 0

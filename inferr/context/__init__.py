@@ -31,13 +31,30 @@ class ContextAssembler:
         self._terminal.stop()
         self._started = False
 
+    def inject_command(self, line: str) -> None:
+        """Forward a shell-plugin captured line into the terminal buffer."""
+        self._terminal.inject_line(line)
+
     def assemble(
         self, session_id: str, conversation_history: list[ConversationTurn]
     ) -> ContextObject:
+        from inferr.server import get_shell_command_buffer
+
         terminal_buffer = self._terminal.get_buffer()
-        shell_history = read_shell_history(self._config.history_depth)
+
+        # Merge shell plugin commands (real terminal) with file history
+        plugin_commands = list(get_shell_command_buffer()[-self._config.history_depth:])
+        file_history = read_shell_history(self._config.history_depth)
+
+        # Plugin commands take priority — they are real-time. Use file history as fallback.
+        shell_history = plugin_commands if plugin_commands else file_history
+
         active_file = self._file_watcher.get_active_file()
-        flagged_errors = extract_errors(terminal_buffer)
+
+        # Run error detection on both terminal buffer AND recent shell commands
+        all_lines = terminal_buffer + plugin_commands
+        flagged_errors = extract_errors(all_lines)
+
         limited_history = conversation_history[-6:]
         timestamp = datetime.now(timezone.utc)
 

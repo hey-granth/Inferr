@@ -24,6 +24,7 @@ from inferr.models import (
     ConversationTurn,
     QueryRequest,
     QueryResponse,
+    ShellCommandCapture,
     WebSocketMessage,
 )
 from inferr.tts import SilkTTSBackend, TTSBackend, get_tts_backend
@@ -35,6 +36,15 @@ context_assembler: ContextAssembler | None = None
 conversation_history: list[ConversationTurn] = []
 tts_backend: TTSBackend | None = None
 last_activity: datetime | None = None
+
+_shell_command_buffer: list[str] = []
+_SHELL_BUFFER_MAX = 200
+
+
+def get_shell_command_buffer() -> list[str]:
+    """Return the current shell command buffer (public accessor for cross-module use)."""
+    return _shell_command_buffer
+
 
 CONFIG_OVERRIDE: Config | None = None
 
@@ -297,6 +307,19 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 backend_name = (
                     tts_backend.name() if tts_backend is not None else "browser"
                 )
+
+                active_file_name = None
+                if context.active_file is not None:
+                    active_file_name = Path(context.active_file.path).name
+
+                context_stats = {
+                    "terminal_lines": len(context.terminal_buffer),
+                    "active_file": active_file_name,
+                    "error_count": sum(
+                        1 for e in context.flagged_errors if e.type != "marker"
+                    ),
+                }
+
                 await websocket.send_json(
                     {
                         "type": "response",
@@ -304,6 +327,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "has_errors": has_errors,
                         "tone": tone,
                         "tts_backend": backend_name,
+                        "context_stats": context_stats,
                     }
                 )
 
@@ -330,6 +354,24 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     except Exception as exc:
         await websocket.send_json({"type": "error", "message": str(exc)})
         await websocket.close(code=1011)
+
+
+@app.post("/capture/command")
+async def capture_command(payload: ShellCommandCapture) -> dict[str, str]:
+    """Receive shell commands from the shell integration plugin."""
+    global _shell_command_buffer
+    entry = payload.command
+    if payload.exit_code != 0:
+        entry = f"{payload.command}  [exit {payload.exit_code}]"
+    _shell_command_buffer.append(entry)
+    if len(_shell_command_buffer) > _SHELL_BUFFER_MAX:
+        _shell_command_buffer = _shell_command_buffer[-_SHELL_BUFFER_MAX:]
+
+    # Also inject into active session's terminal buffer for error detection
+    if context_assembler is not None:
+        context_assembler.inject_command(entry)
+
+    return {"status": "ok"}
 
 
 @app.post("/query", response_model=QueryResponse)

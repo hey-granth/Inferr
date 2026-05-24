@@ -31,6 +31,20 @@ def test_python_keyerror_traceback() -> None:
     assert errors[0].raw
 
 
+def test_python_traceback_single_frame() -> None:
+    lines = [
+        "Traceback (most recent call last):",
+        '  File "script.py", line 5, in <module>',
+        "ValueError: invalid literal",
+    ]
+
+    errors = _get_real_errors(lines)
+
+    assert errors
+    assert errors[0].type == "python_traceback"
+    assert "ValueError" in errors[0].summary
+
+
 def test_uvicorn_error_traceback() -> None:
     lines = [
         "ERROR:    Exception in ASGI application",
@@ -65,6 +79,19 @@ def test_go_panic() -> None:
     assert errors[0].raw
 
 
+def test_multiple_errors_in_same_buffer() -> None:
+    lines = [
+        "panic: runtime error: nil pointer",
+        "CONFLICT (content): Merge conflict in main.go",
+    ]
+
+    errors = _get_real_errors(lines)
+    types = [error.type for error in errors]
+
+    assert "go_panic" in types
+    assert "git_conflict" in types
+
+
 def test_http_error_curl() -> None:
     lines = ["< HTTP/1.1 422 Unprocessable Entity"]
 
@@ -74,6 +101,16 @@ def test_http_error_curl() -> None:
     assert errors[0].type == "http_error"
     assert "HTTP 422 Unprocessable Entity" in errors[0].summary
     assert errors[0].raw
+
+
+def test_http_4xx_detected() -> None:
+    lines = ["< HTTP/1.1 404 Not Found"]
+
+    errors = _get_real_errors(lines)
+
+    assert errors
+    assert errors[0].type == "http_error"
+    assert "404" in errors[0].summary
 
 
 def test_git_conflict() -> None:
@@ -121,3 +158,19 @@ def test_deduplication_within_10_seconds() -> None:
 
     assert first
     assert second == []
+
+
+@pytest.mark.parametrize(
+    ("lines", "expected_type"),
+    [
+        (["panic: crash"], "go_panic"),
+        (["< HTTP/1.1 500 Internal Server Error"], "http_error"),
+        (["CONFLICT (content): Merge conflict in app.py"], "git_conflict"),
+    ],
+)
+def test_error_raw_field_not_empty(lines: list[str], expected_type: str) -> None:
+    errors = _get_real_errors(lines)
+
+    assert errors
+    assert errors[0].raw
+    assert errors[0].type == expected_type
