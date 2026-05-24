@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 from pathlib import Path
 
-from google import genai
-from google.genai import types as genai_types
+from groq import Groq
 
 from inferr.config import Config
 from inferr.context.terminal import sanitize_terminal_line
@@ -192,104 +190,83 @@ async def query_llm(
     system_prompt = build_system_prompt(config.language, tone=tone)
     user_content = _summarize_context(request)
 
-    history: list[genai_types.Content] = []
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": system_prompt}
+    ]
+
     for turn in request.context.conversation_history[-3:]:
-        role = "model" if turn.role == "assistant" else "user"
-        history.append(
-            genai_types.Content(
-                role=role,
-                parts=[genai_types.Part(text=turn.content)],
-            )
-        )
+        role = "assistant" if turn.role == "assistant" else "user"
+        messages.append({"role": role, "content": turn.content})
 
-    history.append(
-        genai_types.Content(
-            role="user",
-            parts=[genai_types.Part(text=f"<context>\n{user_content}\n</context>")],
-        )
-    )
-
-    generate_config = genai_types.GenerateContentConfig(
-        system_instruction=system_prompt,
-        # 200 tokens ≈ 150 words — enough for 3 clear sentences, prevents TTS buffer bloat.
-        # System prompt targets ~25 spoken words; this cap enforces that contract.
-        max_output_tokens=200,
-        temperature=0.2,
-    )
+    messages.append({
+        "role": "user",
+        "content": f"<context>\n{user_content}\n</context>",
+    })
 
     keys_to_try = (
-        config.gemini.api_keys if config.gemini.api_keys else [config.gemini.api_key]
+        config.groq.api_keys if config.groq.api_keys else [config.groq.api_key]
     )
     last_exc: Exception | None = None
 
     debug_logger.log_stage("llm_request_start", {
-        "model": config.gemini.model,
-        "temperature": generate_config.temperature,
-        "max_output_tokens": generate_config.max_output_tokens,
-        "user_content": user_content
+        "model": config.groq.model,
+        "temperature": 0.2,
+        "max_output_tokens": 200,
+        "user_content": user_content,
     })
 
     for api_key in keys_to_try:
         if not api_key:
             continue
-        client = genai.Client(api_key=api_key)
+        client = Groq(api_key=api_key)
         try:
-            client_any: Any = client
-            if hasattr(client_any, "models"):
-                response = await asyncio.to_thread(
-                    client_any.models.generate_content,
-                    model=config.gemini.model,
-                    contents=history,
-                    config=generate_config,
-                )
-            else:
-                response = await client_any.aio.models.generate_content(
-                    model=config.gemini.model,
-                    contents=history,
-                    config=generate_config,
-                )
-            
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model=config.groq.model,
+                messages=messages,  # type: ignore[arg-type]
+                max_tokens=200,
+                temperature=0.2,
+            )
+
             raw_response_text = ""
             finish_reason = None
-            if response.candidates:
-                candidate = response.candidates[0]
-                finish_reason = getattr(candidate, "finish_reason", "unknown")
-                if candidate.content and candidate.content.parts:
-                    raw_response_text = candidate.content.parts[0].text or ""
-            
-            # Check if generation was truncated due to length
-            clean_end = finish_reason in ["STOP", 1, "unknown"] if finish_reason else True
-            if finish_reason in ["MAX_TOKENS", 2]:
-                clean_end = False
-            
+            if response.choices:
+                choice = response.choices[0]
+                finish_reason = choice.finish_reason
+                raw_response_text = choice.message.content or ""
+
+            clean_end = finish_reason == "stop"
+
             debug_logger.log_stage("llm_raw_response", {
-                "model": config.gemini.model,
+                "model": config.groq.model,
                 "response_length": len(raw_response_text),
                 "finish_reason": str(finish_reason),
                 "clean_end": clean_end,
-                "raw_response": raw_response_text
+                "raw_response": raw_response_text,
             })
-            
+
             return raw_response_text
+
         except Exception as exc:
             last_exc = exc
             exc_str = str(exc).lower()
             if (
                 "429" in exc_str
-                or "resource_exhausted" in exc_str
+                or "rate_limit" in exc_str
                 or "quota" in exc_str
+                or "rate limit" in exc_str
             ):
                 continue
-            
+
             debug_logger.log_stage("llm_request_failed", {
                 "error": str(exc),
-                "model": config.gemini.model
+                "model": config.groq.model,
             })
-            raise RuntimeError(f"Gemini API error: {exc}") from exc
+            raise RuntimeError(f"Groq API error: {exc}") from exc
 
     if len(keys_to_try) <= 1 and last_exc is not None:
-        raise RuntimeError(f"Gemini API error: {last_exc}") from last_exc
+        raise RuntimeError(f"Groq API error: {last_exc}") from last_exc
 
     raise RuntimeError(
-        f"All Gemini API keys exhausted or rate limited. Last error: {last_exc}"
+        f"All Groq API keys exhausted or rate limited. Last error: {last_exc}"
     )

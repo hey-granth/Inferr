@@ -364,8 +364,27 @@ function scheduleReconnect() {
     }, RECONNECT_DELAY_MS);
 }
 
+function logPipelineStage(payload) {
+    const ok = payload.ok !== false;
+    const tag = ok ? "OK" : "FAILED";
+    const detail = payload.detail ? JSON.stringify(payload.detail) : "";
+    const err = payload.error ? ` — ${payload.error}` : "";
+    console.log(`[PIPELINE] ${payload.stage}: ${tag}${err}`, detail);
+    document.dispatchEvent(new CustomEvent("inferrPipelineStage", { detail: payload }));
+}
+
 function handleTextMessage(payload) {
+    if (payload.type === "pipeline_stage") {
+        logPipelineStage(payload);
+        return;
+    }
+
     if (payload.type === "response") {
+        logPipelineStage({
+            stage: "PLAYBACK_STARTED",
+            ok: true,
+            detail: { backend: payload.tts_backend || "browser" },
+        });
         const text = String(payload.text || "");
         const hasErrors = payload.has_errors === true;
         const backend = String(payload.tts_backend || "browser");
@@ -462,9 +481,14 @@ function connectWebSocket() {
     });
 }
 
-function sendTranscript(text) {
+function sendTranscript(text, source = "inject") {
     const trimmed = text.trim();
     if (!trimmed) {
+        logPipelineStage({
+            stage: "TRANSCRIPT_EMPTY",
+            ok: false,
+            error: "empty transcript",
+        });
         return;
     }
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -472,6 +496,11 @@ function sendTranscript(text) {
         return;
     }
     lastTranscript = trimmed;
+    logPipelineStage({
+        stage: "TRANSCRIPT_FINALIZED",
+        ok: true,
+        detail: { transcript: trimmed, source },
+    });
     ws.send(JSON.stringify({ type: "transcript", payload: trimmed }));
 }
 
@@ -483,6 +512,13 @@ let sttSilentGain = null;
 let sttCaptureRate = 16000;
 let sttFramesSent = 0;
 let sttLastPcmLogAt = 0;
+
+// Pending transcript buffer: accumulates is_final text until speech_final arrives.
+// Deepgram separates these across two different packets:
+//   Packet A: { is_final: true, speech_final: false, transcript: "Hello?" }
+//   Packet B: { is_final: true, speech_final: true,  transcript: "" }
+// We must buffer A and flush on B.
+let pendingTranscript = "";
 
 function float32ToPcm16(float32Array) {
     const pcm16 = new Int16Array(float32Array.length);
@@ -530,20 +566,38 @@ function handleDeepgramMessage(data) {
         "| transcript:", transcript || "(empty)"
     );
 
-    if (!speechFinal || !transcript) {
-        if (isFinal && transcript) {
-            console.log("[STT] is_final (intermediate) — waiting for speech_final");
+    // Step 1: Accumulate transcript text on every is_final packet.
+    // Deepgram sends the actual words here, before speech_final fires.
+    if (isFinal && transcript) {
+        pendingTranscript = transcript;
+        console.log("[STT] pendingTranscript updated:", pendingTranscript);
+    }
+
+    // Step 2: On speech_final, flush the buffer and invoke the assistant.
+    // The speech_final packet itself typically carries an EMPTY transcript —
+    // that is normal Deepgram behavior. Use the buffered text instead.
+    if (speechFinal) {
+        const toSend = pendingTranscript.trim();
+        pendingTranscript = "";  // Always clear, even if we don't send
+
+        if (!toSend) {
+            console.log("[STT] speech_final received but pendingTranscript is empty — skipping");
+            return;
         }
-        return;
-    }
 
-    if (assistantSpeaking) {
-        console.log("[STT] Transcript SUPPRESSED — assistant is speaking");
-        return;
-    }
+        if (assistantSpeaking) {
+            console.log("[STT] Transcript SUPPRESSED (assistantSpeaking):", toSend);
+            return;
+        }
 
-    console.log("[STT] speech_final → invoking assistant:", transcript);
-    sendTranscript(transcript);
+        logPipelineStage({
+            stage: "STT_OK",
+            ok: true,
+            detail: { transcript: toSend, endpoint: "speech_final" },
+        });
+        console.log("[STT] speech_final → invoking assistant with buffered:", toSend);
+        sendTranscript(toSend, "stt");
+    }
 }
 
 async function startMic() {
@@ -676,6 +730,16 @@ async function startMic() {
             }
         }, 8000);
 
+        logPipelineStage({
+            stage: "STT_OK",
+            ok: true,
+            detail: {
+                mode: "pcm16_capture",
+                encoding: "linear16",
+                deepgramSampleRate: sttSampleRate,
+                captureSampleRate: sttCaptureRate,
+            },
+        });
         console.log("[STT] PCM16 pipeline active", {
             encoding: "linear16",
             deepgramSampleRate: sttSampleRate,
@@ -717,6 +781,7 @@ function stopMic() {
     micActive = false;
     _micStarting = false;
     micBtn.classList.remove("listening");
+    pendingTranscript = "";  // Discard any buffered partial utterance
 
     if (sttProcessorNode) {
         try {
@@ -819,8 +884,14 @@ typedInput.addEventListener("input", () => {
 
 document.addEventListener("silkPlaybackEnd", () => {
     setSpeaking(false);
-    // Re-enable transcript processing now that assistant has finished speaking.
-    // This clears the self-transcription guard set when TTS playback began.
+    logPipelineStage({
+        stage: "PLAYBACK_COMPLETED",
+        ok: true,
+        detail: {
+            chunkCount: silkChunkCount,
+            totalBytes: silkChunkBytes,
+        },
+    });
     if (assistantSpeaking) {
         assistantSpeaking = false;
         console.log("[STT] assistantSpeaking cleared — mic listening resumed after TTS");
@@ -834,6 +905,80 @@ document.addEventListener("silkPlaybackEnd", () => {
         });
     }
 });
+
+/**
+ * Pipeline isolation helpers — use from the browser console during demo debugging.
+ * Each method tests one boundary without running the full stack (unless noted).
+ */
+window.inferrDebug = {
+    /** Bypass STT: LLM → TTS → playback (requires /ws + session). */
+    invokeAssistant(text) {
+        console.log("[inferrDebug] invokeAssistant — bypassing Deepgram STT");
+        sendTranscript(String(text || "hello"), "debug_invoke");
+    },
+    /** Bypass STT + LLM: inject assistant response + run TTS/playback path. */
+    injectResponse(text, backend = "silk") {
+        console.log("[inferrDebug] injectResponse — bypassing STT and LLM");
+        lastTranscript = "[debug inject]";
+        handleTextMessage({
+            type: "response",
+            text: String(text || "hello from inferr debug playback"),
+            has_errors: false,
+            tts_backend: backend,
+            context_stats: {},
+        });
+    },
+    /** Bypass STT, LLM, TTS server: local PCM beep through silkPlayer only. */
+    testPlayback() {
+        console.log("[inferrDebug] testPlayback — local PCM only");
+        assistantSpeaking = true;
+        silkPlayer.reset();
+        const sampleRate = 24000;
+        const durationSec = 0.45;
+        const freq = 440;
+        const samples = Math.floor(sampleRate * durationSec);
+        const pcm = new Int16Array(samples);
+        for (let i = 0; i < samples; i++) {
+            const t = i / sampleRate;
+            pcm[i] = Math.round(Math.sin(2 * Math.PI * freq * t) * 12000);
+        }
+        const bytes = new Uint8Array(pcm.buffer);
+        const chunkBytes = 4096;
+        for (let off = 0; off < bytes.length; off += chunkBytes) {
+            silkPlayer.pushChunk(bytes.subarray(off, off + chunkBytes));
+        }
+        window.setTimeout(() => silkPlayer.finalize(), 80);
+        logPipelineStage({
+            stage: "PLAYBACK_STARTED",
+            ok: true,
+            detail: { mode: "local_beep", sampleRate },
+        });
+    },
+    async testLlm(transcript = "hello") {
+        const res = await fetch("/debug/pipeline/llm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ transcript }),
+        });
+        const data = await res.json();
+        if (data.pipeline_stage) {
+            logPipelineStage(data.pipeline_stage);
+        }
+        return data;
+    },
+    async testTts(text = "hello from inferr") {
+        const res = await fetch("/debug/pipeline/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text, tone: "neutral" }),
+        });
+        return res.json();
+    },
+    async pipelineStatus() {
+        const res = await fetch("/debug/pipeline/status");
+        return res.json();
+    },
+};
 
 drawOscilloscope();
 connectWebSocket();

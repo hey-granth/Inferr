@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Mapping, cast
 import tomllib
 
-from inferr.models import DeepgramConfig, GeminiConfig, SilkConfig
+from inferr.models import DeepgramConfig, GeminiConfig, GroqConfig, SilkConfig
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ class Config:
     port: int
     silk: SilkConfig = field(default_factory=SilkConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
+    groq: GroqConfig = field(default_factory=GroqConfig)
     deepgram: DeepgramConfig = field(default_factory=DeepgramConfig)
 
 
@@ -52,6 +53,10 @@ def _default_toml() -> str:
         "[gemini]\n"
         'api_key = ""\n'
         'model = "gemini-flash-latest"\n'
+        "\n"
+        "[groq]\n"
+        'api_key = ""\n'
+        'model = "llama-3.3-70b-versatile"\n'
         "\n"
         "[deepgram]\n"
         'api_key = ""\n'
@@ -178,14 +183,6 @@ def load_config() -> Config:
     )
     gemini_keys = [key.strip() for key in raw_gemini_keys.split(",") if key.strip()]
     gemini_api_key = gemini_keys[0] if gemini_keys else ""
-    if not gemini_api_key:
-        import sys
-
-        print(
-            "[inferr config] WARNING: GEMINI_API_KEY is empty after load_config(). "
-            "Check that .env exists and contains GEMINI_API_KEY.",
-            file=sys.stderr,
-        )
     gemini_model = os.environ.get(
         "GEMINI_MODEL",
         _coerce_str(raw_gemini.get("model"), "gemini-flash-latest"),
@@ -195,6 +192,37 @@ def load_config() -> Config:
         api_keys=gemini_keys,
         model=gemini_model,
     )
+
+    raw_groq_obj = data.get("groq")
+    raw_groq = (
+        cast(dict[object, object], raw_groq_obj)
+        if isinstance(raw_groq_obj, dict)
+        else {}
+    )
+    raw_groq_keys = os.environ.get(
+        "GROQ_API_KEY",
+        _coerce_str(raw_groq.get("api_key"), ""),
+    )
+    groq_keys = [key.strip() for key in raw_groq_keys.split(",") if key.strip()]
+    groq_api_key = groq_keys[0] if groq_keys else ""
+    groq_model = os.environ.get(
+        "GROQ_MODEL",
+        _coerce_str(raw_groq.get("model"), "llama-3.3-70b-versatile"),
+    )
+    groq_config = GroqConfig(
+        api_key=groq_api_key,
+        api_keys=groq_keys,
+        model=groq_model,
+    )
+
+    if not gemini_api_key and not groq_api_key:
+        import sys
+
+        print(
+            "[inferr config] WARNING: Neither GEMINI_API_KEY nor GROQ_API_KEY is set. "
+            "Add one to your .env file.",
+            file=sys.stderr,
+        )
 
     raw_deepgram_obj = data.get("deepgram")
     raw_deepgram = (
@@ -224,5 +252,6 @@ def load_config() -> Config:
         port=port,
         silk=silk_config,
         gemini=gemini_config,
+        groq=groq_config,
         deepgram=deepgram_config,
     )

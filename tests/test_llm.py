@@ -10,6 +10,7 @@ from inferr.models import (
     ContextObject,
     DeepgramConfig,
     GeminiConfig,
+    GroqConfig,
     QueryRequest,
     SilkConfig,
 )
@@ -52,129 +53,106 @@ def _base_config() -> Config:
         host="127.0.0.1",
         port=7331,
         silk=SilkConfig(),
-        gemini=GeminiConfig(api_key="test-key", model="gemini-flash-latest"),
+        gemini=GeminiConfig(),
+        groq=GroqConfig(api_key="test-key", model="llama-3.3-70b-versatile"),
         deepgram=DeepgramConfig(),
     )
+
+
+def _install_fake_groq(
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: dict[str, object],
+    *,
+    text: str = "ok",
+    choices: list[object] | None = None,
+    create_raises: Exception | None = None,
+) -> None:
+    class FakeMessage:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class FakeChoice:
+        def __init__(self, content: str, finish_reason: str = "stop") -> None:
+            self.message = FakeMessage(content)
+            self.finish_reason = finish_reason
+
+    class FakeResponse:
+        def __init__(self, response_choices: list[object]) -> None:
+            self.choices = response_choices
+
+    class FakeCompletions:
+        def create(self, **kwargs: object) -> FakeResponse:
+            if create_raises is not None:
+                raise create_raises
+            recorded.update(kwargs)
+            if choices is not None:
+                return FakeResponse(choices)
+            return FakeResponse([FakeChoice(text)])
+
+    class FakeChat:
+        def __init__(self) -> None:
+            self.completions = FakeCompletions()
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+            self.chat = FakeChat()
+
+    monkeypatch.setattr("inferr.llm.Groq", FakeClient)
 
 
 @pytest.mark.asyncio
 async def test_query_llm_uses_correct_model(monkeypatch: pytest.MonkeyPatch) -> None:
     recorded: dict[str, object] = {}
-
-    class FakePart:
-        def __init__(self, text: str) -> None:
-            self.text = text
-
-    class FakeContent:
-        def __init__(self, text: str) -> None:
-            self.parts = [FakePart(text)]
-
-    class FakeCandidate:
-        def __init__(self, text: str) -> None:
-            self.content = FakeContent(text)
-
-    class FakeResponse:
-        def __init__(self, text: str) -> None:
-            self.candidates = [FakeCandidate(text)]
-
-    class FakeModels:
-        def generate_content(self, **kwargs: object) -> FakeResponse:
-            recorded.update(kwargs)
-            return FakeResponse("ok")
-
-    class FakeClient:
-        def __init__(self, api_key: str) -> None:
-            self.api_key = api_key
-            self.models = FakeModels()
-
-    monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
+    _install_fake_groq(monkeypatch, recorded)
 
     request = QueryRequest(transcript="hello", context=_base_context())
     result = await query_llm(request, _base_config())
 
     assert result == "ok"
-    assert recorded.get("model") == "gemini-flash-latest"
+    assert recorded.get("model") == "llama-3.3-70b-versatile"
 
 
 @pytest.mark.asyncio
 async def test_query_llm_injects_context_json(monkeypatch: pytest.MonkeyPatch) -> None:
     recorded: dict[str, object] = {}
-
-    class FakePart:
-        def __init__(self, text: str) -> None:
-            self.text = text
-
-    class FakeContent:
-        def __init__(self, text: str) -> None:
-            self.parts = [FakePart(text)]
-
-    class FakeCandidate:
-        def __init__(self, text: str) -> None:
-            self.content = FakeContent(text)
-
-    class FakeResponse:
-        def __init__(self, text: str) -> None:
-            self.candidates = [FakeCandidate(text)]
-
-    class FakeModels:
-        def generate_content(self, **kwargs: object) -> FakeResponse:
-            recorded.update(kwargs)
-            return FakeResponse("ok")
-
-    class FakeClient:
-        def __init__(self, api_key: str) -> None:
-            self.models = FakeModels()
-
-    monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
+    _install_fake_groq(monkeypatch, recorded)
 
     request = QueryRequest(transcript="hello", context=_base_context())
     await query_llm(request, _base_config())
 
-    contents = recorded.get("contents")
-    assert isinstance(contents, list)
-    assert contents
-    last_text = contents[-1].parts[0].text
-    assert "<context>" in last_text
-    assert "</context>" in last_text
+    messages = recorded.get("messages")
+    assert isinstance(messages, list)
+    assert messages
+    last_message = messages[-1]
+    assert isinstance(last_message, dict)
+    assert "<context>" in str(last_message.get("content", ""))
+    assert "</context>" in str(last_message.get("content", ""))
 
 
 @pytest.mark.asyncio
 async def test_query_llm_raises_runtime_error_on_api_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeModels:
-        def generate_content(self, **kwargs: object) -> object:
-            raise Exception("quota exceeded")
-
-    class FakeClient:
-        def __init__(self, api_key: str) -> None:
-            self.models = FakeModels()
-
-    monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
+    recorded: dict[str, object] = {}
+    _install_fake_groq(
+        monkeypatch,
+        recorded,
+        create_raises=Exception("quota exceeded"),
+    )
 
     request = QueryRequest(transcript="hello", context=_base_context())
 
-    with pytest.raises(RuntimeError, match="Gemini API error"):
+    with pytest.raises(RuntimeError, match="Groq API error"):
         await query_llm(request, _base_config())
 
 
 @pytest.mark.asyncio
-async def test_query_llm_returns_empty_on_no_candidates(
+async def test_query_llm_returns_empty_on_no_choices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeResponse:
-        def __init__(self) -> None:
-            self.candidates: list[object] = []
-
-    class FakeModels:
-        def generate_content(self, **kwargs: object) -> FakeResponse:
-            return FakeResponse()
-
-    class FakeClient:
-        def __init__(self, api_key: str) -> None:
-            self.models = FakeModels()
-
-    monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
+    recorded: dict[str, object] = {}
+    _install_fake_groq(monkeypatch, recorded, choices=[])
 
     request = QueryRequest(transcript="hello", context=_base_context())
     result = await query_llm(request, _base_config())
@@ -183,44 +161,19 @@ async def test_query_llm_returns_empty_on_no_candidates(
 
 
 @pytest.mark.asyncio
-async def test_query_llm_history_uses_model_role(
+async def test_query_llm_history_uses_assistant_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recorded: dict[str, object] = {}
-
-    class FakePart:
-        def __init__(self, text: str) -> None:
-            self.text = text
-
-    class FakeContent:
-        def __init__(self, text: str) -> None:
-            self.parts = [FakePart(text)]
-
-    class FakeCandidate:
-        def __init__(self, text: str) -> None:
-            self.content = FakeContent(text)
-
-    class FakeResponse:
-        def __init__(self, text: str) -> None:
-            self.candidates = [FakeCandidate(text)]
-
-    class FakeModels:
-        def generate_content(self, **kwargs: object) -> FakeResponse:
-            recorded.update(kwargs)
-            return FakeResponse("ok")
-
-    class FakeClient:
-        def __init__(self, api_key: str) -> None:
-            self.models = FakeModels()
-
-    monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
+    _install_fake_groq(monkeypatch, recorded)
 
     history = [("user", "u1"), ("assistant", "a1"), ("user", "u2")]
     request = QueryRequest(transcript="hello", context=_base_context(history=history))
     await query_llm(request, _base_config())
 
-    contents = recorded.get("contents")
-    assert isinstance(contents, list)
-    assert contents[0].role == "user"
-    assert contents[1].role == "model"
-    assert contents[2].role == "user"
+    messages = recorded.get("messages")
+    assert isinstance(messages, list)
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+    assert messages[2]["role"] == "assistant"
+    assert messages[3]["role"] == "user"
