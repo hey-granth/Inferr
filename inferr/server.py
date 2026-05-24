@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -101,11 +102,7 @@ async def start_session() -> dict[str, str]:
 
     if os.environ.get("INFERR_NO_BROWSER") != "1":
         try:
-            subprocess.Popen(
-                ["xdg-open", f"http://{config.host}:{config.port}"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            subprocess.Popen(["google-chrome", f"http://{config.host}:{config.port}"])
         except (OSError, FileNotFoundError):
             logger.info("Unable to open browser companion UI.")
 
@@ -148,6 +145,16 @@ async def health() -> dict[str, object | None]:
     }
 
 
+@app.get("/config/browser")
+async def browser_config() -> dict[str, object]:
+    """Return config the browser needs at runtime. Only non-secret values."""
+    cfg = get_config()
+    return {
+        "deepgram_enabled": bool(cfg.deepgram.api_key),
+        "tts_backend": tts_backend.name() if tts_backend else "browser",
+    }
+
+
 def resolve_tone(context: ContextObject) -> str:
     """
     Returns 'urgent' if any flagged errors are present.
@@ -159,6 +166,82 @@ def resolve_tone(context: ContextObject) -> str:
     if not context.conversation_history:
         return "warm"
     return "neutral"
+
+
+@app.websocket("/ws/stt")
+async def speech_to_text_endpoint(websocket: WebSocket) -> None:
+    """Proxy browser microphone audio to Deepgram without exposing API keys."""
+    await websocket.accept()
+
+    cfg = get_config()
+    if not cfg.deepgram.api_key:
+        await websocket.send_json(
+            {"type": "error", "message": "Deepgram is not configured"}
+        )
+        await websocket.close(code=1011)
+        return
+
+    import websockets
+
+    deepgram_url = (
+        "wss://api.deepgram.com/v1/listen"
+        f"?model={cfg.deepgram.model}"
+        f"&language={cfg.deepgram.language}"
+        "&punctuate=true&interim_results=false&endpointing=500"
+    )
+
+    try:
+        async with websockets.connect(
+            deepgram_url,
+            additional_headers={"Authorization": f"Token {cfg.deepgram.api_key}"},
+        ) as deepgram_ws:
+
+            async def browser_to_deepgram() -> None:
+                while True:
+                    message = await websocket.receive()
+                    message_type = message.get("type")
+                    if message_type == "websocket.disconnect":
+                        try:
+                            await deepgram_ws.send('{"type":"CloseStream"}')
+                        except Exception:
+                            return
+                        return
+
+                    payload_bytes = message.get("bytes")
+                    if isinstance(payload_bytes, bytes):
+                        await deepgram_ws.send(payload_bytes)
+                        continue
+
+                    payload_text = message.get("text")
+                    if isinstance(payload_text, str):
+                        await deepgram_ws.send(payload_text)
+
+            async def deepgram_to_browser() -> None:
+                async for message in deepgram_ws:
+                    if isinstance(message, str):
+                        await websocket.send_text(message)
+
+            browser_task = asyncio.create_task(browser_to_deepgram())
+            deepgram_task = asyncio.create_task(deepgram_to_browser())
+            done, pending = await asyncio.wait(
+                {browser_task, deepgram_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in done:
+                exc = task.exception()
+                if exc is not None:
+                    raise exc
+    except WebSocketDisconnect:
+        logger.info("STT WebSocket disconnected.")
+    except Exception as exc:
+        logger.exception("Deepgram STT proxy failed: %s", exc)
+        try:
+            await websocket.send_json({"type": "error", "message": str(exc)})
+        except RuntimeError:
+            return
+        await websocket.close(code=1011)
 
 
 @app.websocket("/ws")
@@ -211,7 +294,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     flagged_error.type != "marker"
                     for flagged_error in context.flagged_errors
                 )
-                backend_name = tts_backend.name() if tts_backend is not None else "browser"
+                backend_name = (
+                    tts_backend.name() if tts_backend is not None else "browser"
+                )
                 await websocket.send_json(
                     {
                         "type": "response",
@@ -225,12 +310,10 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 if tts_backend is not None and tts_backend.name() == "silk":
                     try:
                         tts_backend.speak(response_text, tone=tone)
-                        await websocket.send_json({"type": "silk_end"})
                     except NotImplementedError as exc:
                         logger.info("Silk backend not active yet: %s", exc)
                     except Exception as exc:
                         logger.exception("Silk TTS failed: %s", exc)
-                        await websocket.send_json({"type": "silk_end"})
                 elif tts_backend is not None:
                     try:
                         thread = threading.Thread(

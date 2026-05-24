@@ -6,7 +6,13 @@ import pytest
 
 from inferr.config import Config
 from inferr.llm import build_system_prompt, query_llm
-from inferr.models import ContextObject, QueryRequest, SilkConfig
+from inferr.models import (
+    ContextObject,
+    ElevenLabsConfig,
+    GeminiConfig,
+    QueryRequest,
+    SilkConfig,
+)
 
 
 def test_build_system_prompt_hinglish() -> None:
@@ -21,43 +27,24 @@ def test_build_system_prompt_english() -> None:
     assert "yaar" not in prompt.lower()
 
 
-@pytest.mark.asyncio
-async def test_query_llm_uses_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorded: dict[str, object] = {}
-
-    class FakeBlock:
-        def __init__(self, text: str) -> None:
-            self.text = text
-
-    class FakeResponse:
-        def __init__(self) -> None:
-            self.content = [FakeBlock("ok")]
-
-    class FakeMessages:
-        async def create(self, **kwargs: object) -> FakeResponse:
-            recorded.update(kwargs)
-            return FakeResponse()
-
-    class FakeClient:
-        def __init__(self) -> None:
-            self.messages = FakeMessages()
-
-    def _fake_client() -> FakeClient:
-        return FakeClient()
-
-    monkeypatch.setattr("inferr.llm.AsyncAnthropic", _fake_client)
-
-    context = ContextObject(
+def _base_context(history: list[tuple[str, str]] | None = None) -> ContextObject:
+    turns = []
+    if history:
+        for role, content in history:
+            turns.append({"role": role, "content": content})
+    return ContextObject(
         terminal_buffer=["line"],
         shell_history=["ls"],
         active_file=None,
         flagged_errors=[],
-        conversation_history=[],
+        conversation_history=turns,
         session_id="session",
         timestamp=datetime.now(timezone.utc),
     )
-    request = QueryRequest(transcript="hello", context=context)
-    config = Config(
+
+
+def _base_config() -> Config:
+    return Config(
         terminal_buffer_lines=50,
         history_depth=20,
         file_lines=150,
@@ -66,13 +53,195 @@ async def test_query_llm_uses_model(monkeypatch: pytest.MonkeyPatch) -> None:
         host="127.0.0.1",
         port=7331,
         silk=SilkConfig(),
+        elevenlabs=ElevenLabsConfig(),
+        gemini=GeminiConfig(api_key="test-key", model="gemini-2.0-flash"),
     )
 
-    result = await query_llm(request, config)
+
+@pytest.mark.asyncio
+async def test_query_llm_uses_correct_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: dict[str, object] = {}
+
+    class FakePart:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class FakeContent:
+        def __init__(self, text: str) -> None:
+            self.parts = [FakePart(text)]
+
+    class FakeCandidate:
+        def __init__(self, text: str) -> None:
+            self.content = FakeContent(text)
+
+    class FakeResponse:
+        def __init__(self, text: str) -> None:
+            self.candidates = [FakeCandidate(text)]
+
+    class FakeAioModels:
+        async def generate_content(self, **kwargs: object) -> FakeResponse:
+            recorded.update(kwargs)
+            return FakeResponse("ok")
+
+    class FakeAio:
+        def __init__(self) -> None:
+            self.models = FakeAioModels()
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+            self.aio = FakeAio()
+
+    monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
+
+    request = QueryRequest(transcript="hello", context=_base_context())
+    result = await query_llm(request, _base_config())
 
     assert result == "ok"
-    assert recorded.get("model") == "claude-sonnet-4-6"
-    messages = recorded.get("messages")
-    assert isinstance(messages, list)
-    assert "<context>" in messages[-1]["content"]
-    assert "</context>" in messages[-1]["content"]
+    assert recorded.get("model") == "gemini-2.0-flash"
+
+
+@pytest.mark.asyncio
+async def test_query_llm_injects_context_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: dict[str, object] = {}
+
+    class FakePart:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class FakeContent:
+        def __init__(self, text: str) -> None:
+            self.parts = [FakePart(text)]
+
+    class FakeCandidate:
+        def __init__(self, text: str) -> None:
+            self.content = FakeContent(text)
+
+    class FakeResponse:
+        def __init__(self, text: str) -> None:
+            self.candidates = [FakeCandidate(text)]
+
+    class FakeAioModels:
+        async def generate_content(self, **kwargs: object) -> FakeResponse:
+            recorded.update(kwargs)
+            return FakeResponse("ok")
+
+    class FakeAio:
+        def __init__(self) -> None:
+            self.models = FakeAioModels()
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.aio = FakeAio()
+
+    monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
+
+    request = QueryRequest(transcript="hello", context=_base_context())
+    await query_llm(request, _base_config())
+
+    contents = recorded.get("contents")
+    assert isinstance(contents, list)
+    assert contents
+    last_text = contents[-1].parts[0].text
+    assert "<context>" in last_text
+    assert "</context>" in last_text
+
+
+@pytest.mark.asyncio
+async def test_query_llm_raises_runtime_error_on_api_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeAioModels:
+        async def generate_content(self, **kwargs: object) -> object:
+            raise Exception("quota exceeded")
+
+    class FakeAio:
+        def __init__(self) -> None:
+            self.models = FakeAioModels()
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.aio = FakeAio()
+
+    monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
+
+    request = QueryRequest(transcript="hello", context=_base_context())
+
+    with pytest.raises(RuntimeError, match="Gemini API error"):
+        await query_llm(request, _base_config())
+
+
+@pytest.mark.asyncio
+async def test_query_llm_returns_empty_on_no_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.candidates: list[object] = []
+
+    class FakeAioModels:
+        async def generate_content(self, **kwargs: object) -> FakeResponse:
+            return FakeResponse()
+
+    class FakeAio:
+        def __init__(self) -> None:
+            self.models = FakeAioModels()
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.aio = FakeAio()
+
+    monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
+
+    request = QueryRequest(transcript="hello", context=_base_context())
+    result = await query_llm(request, _base_config())
+
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_query_llm_history_uses_model_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: dict[str, object] = {}
+
+    class FakePart:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class FakeContent:
+        def __init__(self, text: str) -> None:
+            self.parts = [FakePart(text)]
+
+    class FakeCandidate:
+        def __init__(self, text: str) -> None:
+            self.content = FakeContent(text)
+
+    class FakeResponse:
+        def __init__(self, text: str) -> None:
+            self.candidates = [FakeCandidate(text)]
+
+    class FakeAioModels:
+        async def generate_content(self, **kwargs: object) -> FakeResponse:
+            recorded.update(kwargs)
+            return FakeResponse("ok")
+
+    class FakeAio:
+        def __init__(self) -> None:
+            self.models = FakeAioModels()
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.aio = FakeAio()
+
+    monkeypatch.setattr("inferr.llm.genai.Client", FakeClient)
+
+    history = [("user", "u1"), ("assistant", "a1"), ("user", "u2")]
+    request = QueryRequest(transcript="hello", context=_base_context(history=history))
+    await query_llm(request, _base_config())
+
+    contents = recorded.get("contents")
+    assert isinstance(contents, list)
+    assert contents[0].role == "user"
+    assert contents[1].role == "model"
+    assert contents[2].role == "user"

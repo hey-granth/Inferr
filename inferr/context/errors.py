@@ -81,7 +81,9 @@ def extract_errors(lines: list[str]) -> list[FlaggedError]:
                 j += 1
             exception_line = _last_meaningful(block)
             if last_frame_path and last_frame_line and exception_line:
-                summary = f"{exception_line} in {last_frame_path} line {last_frame_line}"
+                summary = (
+                    f"{exception_line} in {last_frame_path} line {last_frame_line}"
+                )
             else:
                 summary = exception_line
             error = _make_error("python_traceback", summary, block)
@@ -126,7 +128,9 @@ def extract_errors(lines: list[str]) -> list[FlaggedError]:
             block = [line]
             summary = _first_meaningful(block)
             if "UnhandledPromiseRejectionWarning:" in summary:
-                summary = summary.split("UnhandledPromiseRejectionWarning:", 1)[1].strip()
+                summary = summary.split("UnhandledPromiseRejectionWarning:", 1)[
+                    1
+                ].strip()
             error = _make_error("node_error", summary, block)
             if error is not None:
                 results.append(error)
@@ -159,6 +163,8 @@ def extract_errors(lines: list[str]) -> list[FlaggedError]:
         i += 1
 
     if results:
-        marker = FlaggedError(type="marker", summary="[!] errors detected", raw="marker")
+        marker = FlaggedError(
+            type="marker", summary="[!] errors detected", raw="marker"
+        )
         return [marker, *results]
     return []

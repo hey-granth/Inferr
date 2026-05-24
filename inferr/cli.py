@@ -69,6 +69,13 @@ def start(
 ) -> None:
     """Start the Inferr server and initialize a session."""
     config = load_config()
+    if not config.gemini.api_key:
+        click.echo(
+            "[inferr] ERROR: GEMINI_API_KEY is not set. "
+            "Add it to your .env file or export it as an environment variable.",
+            err=True,
+        )
+        raise SystemExit(1)
     resolved_port = _resolve_port(config, port)
     resolved_host = _resolve_host(config, host)
     resolved_lang = lang if lang is not None else config.language

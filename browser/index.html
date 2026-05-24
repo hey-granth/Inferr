@@ -1,50 +1,94 @@
 <!doctype html>
 <html lang="en">
-
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Inferr</title>
+    <title>INFERR</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;500&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="style.css" />
 </head>
-
 <body>
-    <main id="app">
-        <header class="header">
-            <div class="title">Inferr</div>
-            <div class="ws-status">
-                <span id="ws-dot" class="dot disconnected"></span>
-                <span class="label">WS</span>
+    <div id="app">
+
+        <!-- LEFT PANEL -->
+        <aside id="left-panel">
+            <div id="brand">
+                <span id="brand-name">INFERR</span>
+                <span id="brand-version">v0.1</span>
             </div>
-        </header>
 
-        <section id="waveform" aria-hidden="true">
-            <span class="bar"></span>
-            <span class="bar"></span>
-            <span class="bar"></span>
-            <span class="bar"></span>
-            <span class="bar"></span>
-        </section>
+            <div id="status-row">
+                <div id="ws-indicator">
+                    <span id="ws-dot"></span>
+                    <span id="ws-label">OFFLINE</span>
+                </div>
+                <div id="tts-indicator">
+                    <span id="tts-label">TTS: —</span>
+                </div>
+            </div>
 
-        <section class="controls">
-            <button id="mic-btn" type="button">Mic</button>
-        </section>
+            <canvas id="oscilloscope" width="260" height="160"></canvas>
 
-        <div id="voice-warning" class="hidden">
-            Voice input requires Chrome. Use the text input below.
-        </div>
+            <div id="mic-zone">
+                <button id="mic-btn" type="button" aria-label="Toggle voice input">
+                    <svg id="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <rect x="9" y="2" width="6" height="12" rx="3"/>
+                        <path d="M5 10a7 7 0 0 0 14 0"/>
+                        <line x1="12" y1="17" x2="12" y2="22"/>
+                        <line x1="8" y1="22" x2="16" y2="22"/>
+                    </svg>
+                    <span id="mic-label">SPEAK</span>
+                </button>
+            </div>
 
-        <section class="input">
-            <textarea id="typed-input" rows="3" placeholder="Type your question here..."></textarea>
-            <button id="send-btn" type="button">Send</button>
-        </section>
+            <div id="error-badge" class="hidden">
+                <span id="error-badge-icon">!</span>
+                <span id="error-badge-text">ERROR DETECTED</span>
+            </div>
 
-        <section id="last-exchange">
-            <div id="error-dot" aria-hidden="true"></div>
-        </section>
-    </main>
+            <div id="voice-warning" class="hidden">
+                Voice input unavailable.<br />Use text input.
+            </div>
 
+            <div id="context-stats">
+                <div class="stat-row">
+                    <span class="stat-label">TERMINAL</span>
+                    <span class="stat-value" id="stat-terminal">—</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">FILE</span>
+                    <span class="stat-value" id="stat-file">—</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">ERRORS</span>
+                    <span class="stat-value" id="stat-errors">0</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- DIVIDER -->
+        <div id="divider"></div>
+
+        <!-- RIGHT PANEL -->
+        <main id="right-panel">
+            <div id="conversation"></div>
+
+            <div id="input-zone">
+                <div id="input-prefix">&gt;</div>
+                <textarea
+                    id="typed-input"
+                    rows="1"
+                    placeholder="ask anything..."
+                    autocomplete="off"
+                    spellcheck="false"
+                ></textarea>
+                <button id="send-btn" type="button">SEND</button>
+            </div>
+        </main>
+
+    </div>
     <script src="app.js"></script>
 </body>
-
 </html>

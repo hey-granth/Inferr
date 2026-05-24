@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Mapping, cast
 import tomllib
 
-from inferr.models import SilkConfig
+from inferr.models import DeepgramConfig, ElevenLabsConfig, GeminiConfig, SilkConfig
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,10 @@ class Config:
     ignored_dirs: list[str]
     host: str
     port: int
-    silk: SilkConfig
+    silk: SilkConfig = field(default_factory=SilkConfig)
+    elevenlabs: ElevenLabsConfig = field(default_factory=ElevenLabsConfig)
+    gemini: GeminiConfig = field(default_factory=GeminiConfig)
+    deepgram: DeepgramConfig = field(default_factory=DeepgramConfig)
 
 
 _DEFAULT_TERMINAL_BUFFER_LINES = 50
@@ -42,10 +45,25 @@ def _default_toml() -> str:
         "port = 7331\n"
         "\n"
         "[silk]\n"
-        'api_url = ""\n'
+        'api_url = "https://silk-api.rumik.ai"\n'
         'api_key = ""\n'
-        'voice_id = "hinglish-dev-v1"\n'
+        'voice_id = "muga"\n'
         "stream = true\n"
+        "\n"
+        "[elevenlabs]\n"
+        'api_key = ""\n'
+        'voice_id = "JBFqnCBsd6RMkjVDRZzb"\n'
+        'model_id = "eleven_multilingual_v2"\n'
+        "stream = true\n"
+        "\n"
+        "[gemini]\n"
+        'api_key = ""\n'
+        'model = "gemini-flash-latest"\n'
+        "\n"
+        "[deepgram]\n"
+        'api_key = ""\n'
+        'model = "nova-2"\n'
+        'language = "en-IN"\n'
     )
 
 
@@ -127,9 +145,7 @@ def load_config() -> Config:
     history_depth = _coerce_int(table.get("history_depth"), _DEFAULT_HISTORY_DEPTH)
     file_lines = _coerce_int(table.get("file_lines"), _DEFAULT_FILE_LINES)
     language = _coerce_str(table.get("language"), _DEFAULT_LANGUAGE)
-    ignored_dirs = _coerce_str_list(
-        table.get("ignored_dirs"), _DEFAULT_IGNORED_DIRS
-    )
+    ignored_dirs = _coerce_str_list(table.get("ignored_dirs"), _DEFAULT_IGNORED_DIRS)
     host = _coerce_str(table.get("host"), _DEFAULT_HOST)
     port = _coerce_int(table.get("port"), _DEFAULT_PORT)
     silk_table_obj = data.get("silk")
@@ -138,16 +154,17 @@ def load_config() -> Config:
         if isinstance(silk_table_obj, dict)
         else {}
     )
-    silk_api_url = _coerce_str(silk_table.get("api_url"), "")
+    silk_api_url = _coerce_str(silk_table.get("api_url"), "https://silk-api.rumik.ai")
     silk_api_key = _coerce_str(silk_table.get("api_key"), "")
-    silk_voice_id = _coerce_str(silk_table.get("voice_id"), "hinglish-dev-v1")
+    silk_voice_id = _coerce_str(silk_table.get("voice_id"), "muga")
     silk_stream = _coerce_bool(silk_table.get("stream"), True)
 
-    env_silk_api_key = os.environ.get("SILK_API_KEY")
-    env_silk_api_url = os.environ.get("SILK_API_URL")
-    if isinstance(env_silk_api_key, str) and env_silk_api_key:
+    env_silk_api_key = os.environ.get("SILK_API_KEY", "")
+    env_silk_api_url = os.environ.get("SILK_API_URL", "")
+    if env_silk_api_key:
         silk_api_key = env_silk_api_key
-    if isinstance(env_silk_api_url, str) and env_silk_api_url:
+        silk_api_url = "https://silk-api.rumik.ai"
+    elif env_silk_api_url:
         silk_api_url = env_silk_api_url
 
     silk_config = SilkConfig(
@@ -155,6 +172,78 @@ def load_config() -> Config:
         api_key=silk_api_key,
         voice_id=silk_voice_id,
         stream=silk_stream,
+    )
+    raw_elevenlabs_obj = data.get("elevenlabs")
+    raw_elevenlabs = (
+        cast(dict[object, object], raw_elevenlabs_obj)
+        if isinstance(raw_elevenlabs_obj, dict)
+        else {}
+    )
+    elevenlabs_api_key = os.environ.get(
+        "ELEVENLABS_API_KEY",
+        _coerce_str(raw_elevenlabs.get("api_key"), ""),
+    )
+    elevenlabs_voice_id = os.environ.get(
+        "ELEVENLABS_VOICE_ID",
+        _coerce_str(raw_elevenlabs.get("voice_id"), "JBFqnCBsd6RMkjVDRZzb"),
+    )
+    elevenlabs_model_id = _coerce_str(
+        raw_elevenlabs.get("model_id"), "eleven_multilingual_v2"
+    )
+    elevenlabs_stream = _coerce_bool(raw_elevenlabs.get("stream"), True)
+    elevenlabs_config = ElevenLabsConfig(
+        api_key=elevenlabs_api_key,
+        voice_id=elevenlabs_voice_id,
+        model_id=elevenlabs_model_id,
+        stream=elevenlabs_stream,
+    )
+
+    raw_gemini_obj = data.get("gemini")
+    raw_gemini = (
+        cast(dict[object, object], raw_gemini_obj)
+        if isinstance(raw_gemini_obj, dict)
+        else {}
+    )
+    raw_gemini_keys = os.environ.get(
+        "GEMINI_API_KEY",
+        _coerce_str(raw_gemini.get("api_key"), ""),
+    )
+    gemini_keys = [key.strip() for key in raw_gemini_keys.split(",") if key.strip()]
+    gemini_api_key = gemini_keys[0] if gemini_keys else ""
+    if not gemini_api_key:
+        import sys
+
+        print(
+            "[inferr config] WARNING: GEMINI_API_KEY is empty after load_config(). "
+            "Check that .env exists and contains GEMINI_API_KEY.",
+            file=sys.stderr,
+        )
+    gemini_model = os.environ.get(
+        "GEMINI_MODEL",
+        _coerce_str(raw_gemini.get("model"), "gemini-flash-latest"),
+    )
+    gemini_config = GeminiConfig(
+        api_key=gemini_api_key,
+        api_keys=gemini_keys,
+        model=gemini_model,
+    )
+
+    raw_deepgram_obj = data.get("deepgram")
+    raw_deepgram = (
+        cast(dict[object, object], raw_deepgram_obj)
+        if isinstance(raw_deepgram_obj, dict)
+        else {}
+    )
+    deepgram_api_key = os.environ.get(
+        "DEEPGRAM_API_KEY",
+        _coerce_str(raw_deepgram.get("api_key"), ""),
+    )
+    deepgram_model = _coerce_str(raw_deepgram.get("model"), "nova-2")
+    deepgram_language = _coerce_str(raw_deepgram.get("language"), "en-IN")
+    deepgram_config = DeepgramConfig(
+        api_key=deepgram_api_key,
+        model=deepgram_model,
+        language=deepgram_language,
     )
 
     return Config(
@@ -166,4 +255,7 @@ def load_config() -> Config:
         host=host,
         port=port,
         silk=silk_config,
+        elevenlabs=elevenlabs_config,
+        gemini=gemini_config,
+        deepgram=deepgram_config,
     )

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Callable, Mapping, Sequence
 
-
 class PtyProcess:
     @classmethod
     def spawn(
@@ -15,7 +14,6 @@ class PtyProcess:
         dimensions: tuple[int, int] = (24, 80),
         pass_fds: Sequence[int] = (),
     ) -> PtyProcess: ...
-
     def read(self, size: int) -> bytes: ...
     def write(self, s: bytes, flush: bool = True) -> int: ...
     def terminate(self, force: bool = False) -> None: ...

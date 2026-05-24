@@ -1,32 +1,82 @@
 const wsDot = document.getElementById("ws-dot");
-const waveform = document.getElementById("waveform");
 const micBtn = document.getElementById("mic-btn");
 const sendBtn = document.getElementById("send-btn");
 const typedInput = document.getElementById("typed-input");
-const lastExchange = document.getElementById("last-exchange");
 const voiceWarning = document.getElementById("voice-warning");
-const errorDot = document.getElementById("error-dot");
+const conversation = document.getElementById("conversation");
+
+const canvas = document.getElementById("oscilloscope");
+const ctx = canvas.getContext("2d");
+
+let speaking = false;
+let speakPhase = 0;
+let idlePhase = 0;
 
 let ws = null;
-let recognition = null;
-let listening = false;
 let lastTranscript = "";
 let reconnectAttempts = 0;
 let shouldReconnect = true;
 let silkChunks = [];
 
+let deepgramEnabled = false;
+let deepgramSocket = null;
+let mediaRecorder = null;
+let keepAliveInterval = null;
+let micActive = false;
+let micStream = null;
+
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY_MS = 2000;
 
-function ensureWaveformBars() {
-    if (!waveform) {
-        return;
+function drawOscilloscope() {
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    ctx.fillStyle = "#080c10";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.strokeStyle = "rgba(0, 212, 255, 0.06)";
+    ctx.lineWidth = 1;
+    for (let y = 0; y <= H; y += H / 4) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(W, y);
+        ctx.stroke();
     }
-    while (waveform.children.length < 7) {
-        const bar = document.createElement("span");
-        bar.className = "bar";
-        waveform.appendChild(bar);
+
+    ctx.beginPath();
+    ctx.strokeStyle = speaking ? "#00d4ff" : "rgba(0, 212, 255, 0.35)";
+    ctx.lineWidth = speaking ? 1.5 : 1;
+    ctx.shadowBlur = speaking ? 8 : 0;
+    ctx.shadowColor = "#00d4ff";
+
+    const points = 64;
+    for (let i = 0; i <= points; i++) {
+        const x = (i / points) * W;
+        let y = H / 2;
+
+        if (speaking) {
+            const t = speakPhase + i * 0.18;
+            y = H / 2
+                + Math.sin(t) * (H * 0.28)
+                + Math.sin(t * 2.3 + 1.2) * (H * 0.12)
+                + Math.sin(t * 0.7 + 2.4) * (H * 0.08);
+        } else {
+            const t = idlePhase + i * 0.25;
+            y = H / 2 + Math.sin(t) * (H * 0.04);
+        }
+
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
     }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    if (speaking) speakPhase += 0.09;
+    else idlePhase += 0.008;
+
+    requestAnimationFrame(drawOscilloscope);
 }
 
 function escapeHtml(text) {
@@ -37,25 +87,80 @@ function escapeHtml(text) {
         .replace(/\"/g, "&quot;");
 }
 
+function addExchange(query, response, isError = false) {
+    const div = document.createElement("div");
+    div.className = "exchange" + (isError ? " exchange-error" : "");
+
+    if (query) {
+        const q = document.createElement("div");
+        q.className = "exchange-query";
+        q.innerHTML = `<span class="exchange-prefix">YOU</span><span class="exchange-text">${escapeHtml(query)}</span>`;
+        div.appendChild(q);
+    }
+
+    const r = document.createElement("div");
+    r.className = "exchange-response";
+    r.innerHTML = `<span class="exchange-prefix">INF</span><span class="exchange-text">${escapeHtml(response)}</span>`;
+    div.appendChild(r);
+
+    conversation.appendChild(div);
+    conversation.scrollTop = conversation.scrollHeight;
+}
+
+function setSpeaking(active) {
+    speaking = active;
+}
+
 function setWsStatus(connected) {
+    const dot = document.getElementById("ws-dot");
+    const label = document.getElementById("ws-label");
     if (connected) {
-        wsDot.classList.add("connected");
-        wsDot.classList.remove("disconnected");
-        wsDot.title = "Connected";
+        dot.classList.add("connected");
+        label.textContent = "ONLINE";
     } else {
-        wsDot.classList.remove("connected");
-        wsDot.classList.add("disconnected");
+        dot.classList.remove("connected");
+        label.textContent = "OFFLINE";
     }
 }
 
-function triggerErrorDot() {
-    if (!errorDot) {
-        return;
+function setTtsBackend(name) {
+    document.getElementById("tts-label").textContent = `TTS: ${String(name).toUpperCase()}`;
+}
+
+function setContextStats(payload) {
+    if (payload.terminal_lines != null)
+        document.getElementById("stat-terminal").textContent = payload.terminal_lines + " lines";
+    if (payload.active_file != null)
+        document.getElementById("stat-file").textContent = payload.active_file || "—";
+    if (payload.error_count != null)
+        document.getElementById("stat-errors").textContent = payload.error_count;
+}
+
+function triggerErrorBadge() {
+    const badge = document.getElementById("error-badge");
+    badge.classList.remove("hidden");
+    window.setTimeout(() => badge.classList.add("hidden"), 10000);
+}
+
+async function loadBrowserConfig() {
+    try {
+        const res = await fetch("/config/browser");
+        const cfg = await res.json();
+        deepgramEnabled = cfg.deepgram_enabled === true;
+        if (cfg.tts_backend) {
+            setTtsBackend(cfg.tts_backend);
+        }
+        if (!deepgramEnabled) {
+            voiceWarning.textContent = "DEEPGRAM_API_KEY not set. Use text input.";
+            voiceWarning.classList.remove("hidden");
+            micBtn.classList.add("hidden");
+        }
+    } catch (error) {
+        console.error("Failed to load browser config:", error);
+        voiceWarning.textContent = "Runtime config unavailable. Use text input.";
+        voiceWarning.classList.remove("hidden");
+        micBtn.classList.add("hidden");
     }
-    errorDot.classList.add("error-active");
-    window.setTimeout(() => {
-        errorDot.classList.remove("error-active");
-    }, 10000);
 }
 
 function concatChunks(chunks) {
@@ -77,42 +182,60 @@ function playSilkAudio(chunks) {
         document.dispatchEvent(new CustomEvent("silkPlaybackEnd"));
         return;
     }
-    const bytes = concatChunks(chunks);
-    const blob = new Blob([bytes], { type: "audio/mpeg" });
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    audio.onended = () => {
-        URL.revokeObjectURL(url);
+
+    let totalSamples = 0;
+    for (const chunk of chunks) totalSamples += chunk.length / 2;
+
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) {
         document.dispatchEvent(new CustomEvent("silkPlaybackEnd"));
+        return;
+    }
+
+    const audioCtx = new AudioContextCtor({ sampleRate: 24000 });
+    const buffer = audioCtx.createBuffer(1, totalSamples, 24000);
+    const channelData = buffer.getChannelData(0);
+
+    let offset = 0;
+    for (const chunk of chunks) {
+        const int16 = new Int16Array(
+            chunk.buffer,
+            chunk.byteOffset,
+            chunk.byteLength / 2
+        );
+        for (let i = 0; i < int16.length; i++) {
+            channelData[offset++] = int16[i] / 32768;
+        }
+    }
+
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioCtx.destination);
+    source.onended = () => {
+        document.dispatchEvent(new CustomEvent("silkPlaybackEnd"));
+        void audioCtx.close();
     };
-    audio.onerror = () => {
-        URL.revokeObjectURL(url);
-        document.dispatchEvent(new CustomEvent("silkPlaybackEnd"));
-    };
-    void audio.play().catch(() => {
-        URL.revokeObjectURL(url);
-        document.dispatchEvent(new CustomEvent("silkPlaybackEnd"));
-    });
+    source.start();
 }
 
 function speakInBrowser(text) {
     try {
         const utterance = new SpeechSynthesisUtterance(text);
-        waveform.classList.add("speaking");
+        setSpeaking(true);
         utterance.onend = () => {
-            waveform.classList.remove("speaking");
+            setSpeaking(false);
         };
         utterance.onerror = () => {
-            waveform.classList.remove("speaking");
+            setSpeaking(false);
         };
         window.speechSynthesis.speak(utterance);
     } catch (err) {
-        waveform.classList.remove("speaking");
+        setSpeaking(false);
     }
 }
 
 function showReconnectFailure() {
-    lastExchange.innerHTML = '<div class="error">Connection lost. Restart inferr.</div>';
+    addExchange("", "Connection lost. Restart inferr.", true);
 }
 
 function scheduleReconnect() {
@@ -136,12 +259,15 @@ function handleTextMessage(payload) {
         const text = String(payload.text || "");
         const hasErrors = payload.has_errors === true;
         const backend = String(payload.tts_backend || "browser");
-        lastExchange.innerHTML =
-            `<div><strong>You:</strong> ${escapeHtml(lastTranscript)}</div>` +
-            `<div><strong>Inferr:</strong> ${escapeHtml(text)}</div>`;
+        addExchange(lastTranscript, text);
+        setTtsBackend(backend);
 
         if (hasErrors) {
-            triggerErrorDot();
+            triggerErrorBadge();
+        }
+
+        if (payload.context_stats) {
+            setContextStats(payload.context_stats);
         }
 
         if (backend === "browser") {
@@ -155,9 +281,7 @@ function handleTextMessage(payload) {
     }
 
     if (payload.type === "error") {
-        lastExchange.innerHTML = `<div class="error">${escapeHtml(
-            String(payload.message || "Unknown error")
-        )}</div>`;
+        addExchange("", String(payload.message || "Unknown error"), true);
     }
 }
 
@@ -184,7 +308,7 @@ function connectWebSocket() {
         if (typeof event.data !== "string") {
             const arrayBuffer = await event.data.arrayBuffer();
             if (silkChunks.length === 0) {
-                waveform.classList.add("speaking");
+                setSpeaking(true);
             }
             silkChunks.push(new Uint8Array(arrayBuffer));
             return;
@@ -206,61 +330,132 @@ function sendTranscript(text) {
         return;
     }
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-        lastExchange.innerHTML = '<div class="error">WebSocket is not connected.</div>';
+        addExchange("", "WebSocket is not connected.", true);
         return;
     }
     lastTranscript = trimmed;
     ws.send(JSON.stringify({ type: "transcript", payload: trimmed }));
 }
 
-function setupSpeechRecognition() {
-    const SpeechRecognition =
-        window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-        micBtn.classList.add("hidden");
-        voiceWarning.classList.remove("hidden");
+async function startMic() {
+    if (!deepgramEnabled) {
         return;
     }
 
-    recognition = new SpeechRecognition();
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    let stream;
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (error) {
+        voiceWarning.textContent = "Microphone access denied.";
+        voiceWarning.classList.remove("hidden");
+        return;
+    }
+    micStream = stream;
 
-    recognition.onstart = () => {
-        listening = true;
+    const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+    const sttUrl = `${scheme}://${window.location.host}/ws/stt`;
+    deepgramSocket = new WebSocket(sttUrl);
+    deepgramSocket.binaryType = "arraybuffer";
+
+    deepgramSocket.onopen = () => {
+        micActive = true;
         micBtn.classList.add("listening");
+
+        try {
+            mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+        } catch (error) {
+            mediaRecorder = new MediaRecorder(stream);
+        }
+
+        mediaRecorder.addEventListener("dataavailable", (event) => {
+            if (event.data.size > 0 && deepgramSocket.readyState === WebSocket.OPEN) {
+                deepgramSocket.send(event.data);
+            }
+        });
+        mediaRecorder.start(250);
+
+        keepAliveInterval = window.setInterval(() => {
+            if (deepgramSocket && deepgramSocket.readyState === WebSocket.OPEN) {
+                deepgramSocket.send(JSON.stringify({ type: "KeepAlive" }));
+            }
+        }, 8000);
     };
 
-    recognition.onend = () => {
-        listening = false;
-        micBtn.classList.remove("listening");
-    };
-
-    recognition.onerror = () => {
-        listening = false;
-        micBtn.classList.remove("listening");
-    };
-
-    recognition.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        sendTranscript(transcript);
-    };
-
-    micBtn.addEventListener("click", () => {
-        if (!recognition) {
+    deepgramSocket.onmessage = (event) => {
+        if (typeof event.data !== "string") {
             return;
         }
-        if (listening) {
-            recognition.stop();
-        } else {
-            recognition.start();
+        let data;
+        try {
+            data = JSON.parse(event.data);
+        } catch {
+            return;
         }
-    });
+
+        if (
+            data.type === "Results" &&
+            data.is_final === true &&
+            data.channel?.alternatives?.[0]?.transcript
+        ) {
+            const transcript = data.channel.alternatives[0].transcript.trim();
+            if (transcript) {
+                sendTranscript(transcript);
+                stopMic();
+            }
+            return;
+        }
+
+        if (data.type === "error" && data.message) {
+            addExchange("", String(data.message), true);
+            stopMic();
+        }
+    };
+
+    deepgramSocket.onerror = () => stopMic();
+    deepgramSocket.onclose = () => {
+        micActive = false;
+        micBtn.classList.remove("listening");
+    };
 }
+
+function stopMic() {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+        mediaRecorder.stream.getTracks().forEach((track) => track.stop());
+    } else if (micStream) {
+        micStream.getTracks().forEach((track) => track.stop());
+    }
+    if (keepAliveInterval !== null) {
+        clearInterval(keepAliveInterval);
+        keepAliveInterval = null;
+    }
+    if (deepgramSocket) {
+        if (deepgramSocket.readyState === WebSocket.OPEN) {
+            deepgramSocket.send(JSON.stringify({ type: "CloseStream" }));
+        }
+        if (deepgramSocket.readyState === WebSocket.OPEN || deepgramSocket.readyState === WebSocket.CONNECTING) {
+            deepgramSocket.close();
+        }
+    }
+    micActive = false;
+    micBtn.classList.remove("listening");
+    mediaRecorder = null;
+    deepgramSocket = null;
+    micStream = null;
+}
+
+micBtn.addEventListener("click", () => {
+    if (micActive) {
+        stopMic();
+    } else {
+        void startMic();
+    }
+});
 
 sendBtn.addEventListener("click", () => {
     sendTranscript(typedInput.value);
     typedInput.value = "";
+    typedInput.style.height = "auto";
 });
 
 typedInput.addEventListener("keydown", (event) => {
@@ -268,16 +463,22 @@ typedInput.addEventListener("keydown", (event) => {
         event.preventDefault();
         sendTranscript(typedInput.value);
         typedInput.value = "";
+        typedInput.style.height = "auto";
     }
 });
 
-document.addEventListener("silkPlaybackEnd", () => {
-    waveform.classList.remove("speaking");
+typedInput.addEventListener("input", () => {
+    typedInput.style.height = "auto";
+    typedInput.style.height = Math.min(typedInput.scrollHeight, 120) + "px";
 });
 
-ensureWaveformBars();
+document.addEventListener("silkPlaybackEnd", () => {
+    setSpeaking(false);
+});
+
+drawOscilloscope();
 connectWebSocket();
-setupSpeechRecognition();
+void loadBrowserConfig();
 
 setInterval(() => {
     if (ws && ws.readyState === WebSocket.OPEN) {

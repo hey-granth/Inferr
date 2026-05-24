@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ActiveFile(BaseModel):
@@ -35,10 +35,29 @@ class ContextObject(BaseModel):
 
 
 class SilkConfig(BaseModel):
-    api_url: str = ""
+    api_url: str = "https://silk-api.rumik.ai"
     api_key: str = ""
-    voice_id: str = "hinglish-dev-v1"
+    voice_id: str = "muga"
     stream: bool = True
+
+
+class ElevenLabsConfig(BaseModel):
+    api_key: str = ""
+    voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
+    model_id: str = "eleven_multilingual_v2"
+    stream: bool = True
+
+
+class GeminiConfig(BaseModel):
+    api_key: str = ""
+    api_keys: list[str] = Field(default_factory=list)
+    model: str = "gemini-2.0-flash"
+
+
+class DeepgramConfig(BaseModel):
+    api_key: str = ""
+    model: str = "nova-2"
+    language: str = "en-IN"
 
 
 class QueryRequest(BaseModel):

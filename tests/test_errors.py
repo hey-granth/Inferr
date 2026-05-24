@@ -58,7 +58,10 @@ def test_go_panic() -> None:
 
     assert errors
     assert errors[0].type == "go_panic"
-    assert "panic: runtime error: index out of range [3] with length 3" in errors[0].summary
+    assert (
+        "panic: runtime error: index out of range [3] with length 3"
+        in errors[0].summary
+    )
     assert errors[0].raw
 
 
