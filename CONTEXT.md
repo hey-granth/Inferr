@@ -2,7 +2,7 @@
 
 A software project composed of the following subsystems:
 
-- **inferr/**: Primary subsystem containing 14 files
+- **inferr/**: Primary subsystem containing 15 files
 - **tests/**: Primary subsystem containing 7 files
 - **browser/**: Primary subsystem containing 3 files
 - **typings/**: Primary subsystem containing 2 files
@@ -267,6 +267,7 @@ def install_shell(shell_name: Optional[str]) -> None:
 - `install_shell()`
 
 **`inferr/tts.py`**
+- `tts_timeout_seconds()`
 - class `_PreparedTTSText`
   - `__new__()`
   - `__eq__()`
@@ -290,6 +291,7 @@ def install_shell(shell_name: Optional[str]) -> None:
   - `name()`
 - class `Pyttsx3TTSBackend`
   - `speak()`
+  - `_speak_sync()`
   - `is_available()`
   - `name()`
 - class `BrowserTTSBackend`
@@ -301,8 +303,29 @@ def install_shell(shell_name: Optional[str]) -> None:
 - `tts_stub_available()`
 
 **`inferr/llm.py`**
+- `_is_high_signal()`
+- `_rank_terminal_lines()`
 - `build_system_prompt()`
+- `_shorten_line()`
+- `_summarize_context()`
 - `query_llm()`
+
+**`inferr/server.py`**
+- `get_shell_command_buffer()`
+- `_apply_env_overrides()`
+- `get_config()`
+- `lifespan()`
+- `unhandled_exception_handler()`
+- `start_session()`
+- `stop_session()`
+- `get_context()`
+- `health()`
+- `browser_config()`
+- `resolve_tone()`
+- `speech_to_text_endpoint()`
+- `websocket_endpoint()`
+- `capture_command()`
+- `query_endpoint()`
 
 **`inferr/context/errors.py`**
 - `_first_meaningful()`
@@ -321,22 +344,24 @@ def install_shell(shell_name: Optional[str]) -> None:
   - `write()`
   - `stop()`
 
-**`inferr/server.py`**
-- `get_shell_command_buffer()`
-- `_apply_env_overrides()`
-- `get_config()`
-- `lifespan()`
-- `unhandled_exception_handler()`
-- `start_session()`
-- `stop_session()`
-- `get_context()`
-- `health()`
-- `browser_config()`
-- `resolve_tone()`
-- `speech_to_text_endpoint()`
-- `websocket_endpoint()`
-- `capture_command()`
-- `query_endpoint()`
+**`browser/app.js`**
+- `drawOscilloscope()`
+- `escapeHtml()`
+- `addExchange()`
+- `setSpeaking()`
+- `setWsStatus()`
+- `setTtsBackend()`
+- `setContextStats()`
+- `triggerErrorBadge()`
+- `loadBrowserConfig()`
+- `speakInBrowser()`
+- `showReconnectFailure()`
+- `scheduleReconnect()`
+- `handleTextMessage()`
+- `connectWebSocket()`
+- `sendTranscript()`
+- `startMic()`
+- `stopMic()`
 
 ## IMPORTANT_CALL_PATHS
 
@@ -374,76 +399,42 @@ cli.cli()
 - `def _get_table(data: Mapping[str, object]) -> dict[str, object]`
 - `def load_config() -> Config`
 
-## SUPPORTING_MODULES
-
 ### `inferr/tts.py`
 
-```python
-class _PreparedTTSText(str)
+**Purpose:** Implements tts.
+**Depends on:** `config`, `debug`, `models`
 
-class SilkAPIError(Exception)
-    """Raised when Silk API synthesis fails."""
+**Types:**
+- `BrowserTTSBackend` (bases: `TTSBackend`) methods: `is_available`, `name`, `speak`
+- `Pyttsx3TTSBackend` (bases: `TTSBackend`) methods: `is_available`, `name`, `speak`
 
-class TTSBackend(ABC)
+**Functions:**
+- `def _count_to_spoken(count: int, hinglish: bool) -> str`
+- `def _is_bullet(line: str) -> bool`
+- `def _is_hinglish_text(text: str) -> bool`
+- `def _preprocess_tts_text(text: str, tone: str = "neutral") -> str`
+- `def _strip_bullet_prefix(line: str) -> str`
+- `def _validate_tone(tone: str) -> None`
 
-def _validate_tone(tone: str) -> None
-
-def _count_to_spoken(count: int, hinglish: bool) -> str
-
-def _is_bullet(line: str) -> bool
-
-def _strip_bullet_prefix(line: str) -> str
-
-def _is_hinglish_text(text: str) -> bool
-
-def _preprocess_tts_text(text: str, tone: str = "neutral") -> str
-
-class SilkTTSBackend(TTSBackend)
-
-class Pyttsx3TTSBackend(TTSBackend)
-
-class BrowserTTSBackend(TTSBackend)
-
-def get_tts_backend(config: Config) -> TTSBackend
-
-async def speak_pyttsx3(text: str) -> None
-
-def tts_stub_available() -> bool
-
-```
+## SUPPORTING_MODULES
 
 ### `inferr/llm.py`
 
 ```python
+def _is_high_signal(line: str) -> bool
+
+def _rank_terminal_lines(lines: list[str], limit: int) -> list[str]
+    """Return up to `limit` lines, prioritising high-signal diagnostics."""
+
 def build_system_prompt(language: str, tone: str = "neutral") -> str
+
+def _shorten_line(value: str, max_len: int = 120) -> str
+
+def _summarize_context(request: QueryRequest) -> str
 
 def query_llm(
     request: QueryRequest, config: Config, tone: str = "neutral"
 ) -> str
-
-```
-
-### `inferr/context/errors.py`
-
-```python
-def _first_meaningful(lines: Iterable[str]) -> str
-
-def _last_meaningful(lines: list[str]) -> str
-
-def _should_emit(error_type: str, summary: str) -> bool
-
-def _make_error(
-    error_type: str, summary: str, raw_lines: list[str]
-) -> FlaggedError | None
-
-def extract_errors(lines: list[str]) -> list[FlaggedError]
-
-```
-
-### `inferr/context/terminal.py`
-
-```python
-class TerminalCapture
 
 ```
 
@@ -479,8 +470,7 @@ def browser_config() -> dict[str, object]
     """Return config the browser needs at runtime. Only non-secret values."""
 
 def resolve_tone(context: ContextObject) -> str
-    """Returns 'urgent' if any flagged errors are present.
-    Returns 'warm' if conversation_history is empty (first query of the session).
+    """Returns 'urgent' if real (non-marker) errors are flagged.
     Returns 'neutral' otherwise."""
 
 def speech_to_text_endpoint(websocket: WebSocket) -> None
@@ -497,6 +487,73 @@ def query_endpoint(request: QueryRequest) -> QueryResponse
 
 ```
 
+### `inferr/context/errors.py`
+
+```python
+def _first_meaningful(lines: Iterable[str]) -> str
+
+def _last_meaningful(lines: list[str]) -> str
+
+def _should_emit(error_type: str, summary: str) -> bool
+
+def _make_error(
+    error_type: str, summary: str, raw_lines: list[str]
+) -> FlaggedError | None
+
+def extract_errors(lines: list[str]) -> list[FlaggedError]
+
+```
+
+### `inferr/context/terminal.py`
+
+```python
+class TerminalCapture
+
+```
+
+### `browser/app.js`
+
+```javascript
+function drawOscilloscope()
+
+function escapeHtml(text)
+
+function addExchange(query, response, isError = false)
+
+function setSpeaking(active)
+
+function setWsStatus(connected)
+
+function setTtsBackend(name)
+
+function setContextStats(payload)
+
+function triggerErrorBadge()
+
+async function loadBrowserConfig()
+
+function speakInBrowser(text)
+
+function showReconnectFailure()
+
+function scheduleReconnect()
+
+function handleTextMessage(payload)
+
+function connectWebSocket()
+
+function sendTranscript(text)
+
+async function startMic()
+
+function stopMic()
+
+```
+
+### `browser/style.css`
+
+*426 lines, 0 imports*
+
 ## DEPENDENCY_GRAPH
 
 ```mermaid
@@ -506,53 +563,56 @@ graph LR
     f2["inferr/cli.py"]
     f3["inferr/tts.py"]
     f4["inferr/llm.py"]
-    f5["inferr/context/errors.py"]
-    f6["inferr/context/terminal.py"]
-    f7["pyproject.toml"]
-    f8["inferr/server.py"]
-    f9["inferr/context/__init__.py"]
-    f10["browser/app.js"]
-    f11["browser/index.html"]
-    f12["browser/style.css"]
-    f13["inferr/__init__.py"]
+    f5["inferr/server.py"]
+    f6["inferr/context/errors.py"]
+    f7["inferr/context/terminal.py"]
+    f8["browser/app.js"]
+    f9["browser/style.css"]
+    f10["pyproject.toml"]
+    f11["inferr/context/__init__.py"]
+    f12["inferr/__init__.py"]
+    f13["browser/index.html"]
     f14["typings/ptyprocess.pyi"]
     f15["requirements.txt"]
     f16["inferr/context/files.py"]
-    f17["typings/pyttsx3.pyi"]
-    f18["inferr/context/history.py"]
-    f19["inferr/shell/inferr.bash"]
-    f20["inferr/shell/inferr.zsh"]
-    f21[".gitignore"]
+    f17["inferr/debug.py"]
+    f18["typings/pyttsx3.pyi"]
+    f19["inferr/context/history.py"]
+    f20["inferr/shell/inferr.bash"]
+    f21["inferr/shell/inferr.zsh"]
+    f22[".gitignore"]
     f1 --> f0
-    f2 --> f13
+    f2 --> f5
+    f2 --> f12
     f2 --> f1
     f3 --> f2
+    f3 --> f17
     f3 --> f0
     f3 --> f1
+    f4 --> f17
     f4 --> f0
     f4 --> f1
-    f5 --> f2
+    f5 --> f17
+    f5 --> f3
     f5 --> f0
+    f5 --> f4
+    f5 --> f11
+    f5 --> f1
     f6 --> f2
-    f6 --> f14
+    f6 --> f0
     f7 --> f2
+    f7 --> f14
     f8 --> f2
-    f8 --> f3
-    f8 --> f0
-    f8 --> f4
-    f8 --> f9
-    f8 --> f1
-    f9 --> f8
-    f9 --> f6
-    f9 --> f18
-    f9 --> f16
-    f9 --> f5
-    f9 --> f0
-    f9 --> f1
+    f9 --> f2
     f10 --> f2
-    f11 --> f2
-    f12 --> f2
-    f16 --> f2
+    f11 --> f5
+    f11 --> f7
+    f11 --> f19
+    f11 --> f16
+    f11 --> f6
+    f11 --> f0
+    f11 --> f1
+    f13 --> f2
     f16 --> f0
     f16 --> f1
 ```
@@ -562,64 +622,64 @@ graph LR
 > [!WARNING]
 > The following circular import chains were detected:
 
-1. `inferr/context/__init__.py` -> `inferr/server.py`
+1. `inferr/server.py` -> `inferr/context/__init__.py`
 
 ## RANKED_FILES
 
 | File | Score | Tier | Tokens |
 |------|-------|------|--------|
-| `inferr/models.py` | 0.853 | structured summary | 92 |
-| `inferr/config.py` | 0.837 | structured summary | 164 |
-| `inferr/cli.py` | 0.807 | full source | 1611 |
+| `inferr/models.py` | 0.808 | structured summary | 92 |
+| `inferr/config.py` | 0.792 | structured summary | 164 |
+| `inferr/cli.py` | 0.784 | full source | 1611 |
+| `inferr/tts.py` | 0.626 | structured summary | 197 |
+| `inferr/llm.py` | 0.552 | signatures | 139 |
 | `tests/test_llm.py` | 0.533 | one-liner | 21 |
-| `inferr/tts.py` | 0.523 | signatures | 199 |
-| `tests/test_context.py` | 0.520 | one-liner | 20 |
-| `inferr/llm.py` | 0.498 | signatures | 58 |
-| `tests/test_server.py` | 0.453 | one-liner | 20 |
-| `inferr/context/errors.py` | 0.434 | signatures | 101 |
-| `inferr/context/terminal.py` | 0.408 | signatures | 18 |
-| `pyproject.toml` | 0.390 | one-liner | 12 |
-| `inferr/server.py` | 0.388 | signatures | 345 |
-| `tests/test_tts.py` | 0.373 | one-liner | 21 |
-| `inferr/context/__init__.py` | 0.327 | one-liner | 23 |
-| `browser/app.js` | 0.301 | one-liner | 15 |
-| `browser/index.html` | 0.301 | one-liner | 11 |
-| `browser/style.css` | 0.301 | one-liner | 11 |
-| `tests/test_errors.py` | 0.291 | one-liner | 20 |
-| `inferr/__init__.py` | 0.288 | one-liner | 18 |
-| `typings/ptyprocess.pyi` | 0.271 | one-liner | 22 |
-| `requirements.txt` | 0.260 | one-liner | 10 |
-| `inferr/context/files.py` | 0.231 | one-liner | 26 |
-| `PROJECT_CONTEXT.md` | 0.230 | one-liner | 11 |
-| `README.md` | 0.228 | one-liner | 10 |
-| `tests/test_tts_preprocessing.py` | 0.213 | one-liner | 23 |
-| `tests/test_llm_prompt.py` | 0.205 | one-liner | 22 |
-| `typings/pyttsx3.pyi` | 0.171 | one-liner | 23 |
-| `inferr/context/history.py` | 0.133 | one-liner | 21 |
-| `inferr/shell/inferr.bash` | 0.098 | one-liner | 17 |
-| `inferr/shell/inferr.zsh` | 0.098 | one-liner | 17 |
-| `.gitignore` | 0.081 | one-liner | 10 |
+| `inferr/server.py` | 0.526 | signatures | 331 |
+| `tests/test_server.py` | 0.492 | one-liner | 20 |
+| `tests/test_context.py` | 0.492 | one-liner | 20 |
+| `tests/test_tts.py` | 0.476 | one-liner | 21 |
+| `inferr/context/errors.py` | 0.436 | signatures | 101 |
+| `inferr/context/terminal.py` | 0.409 | signatures | 18 |
+| `browser/app.js` | 0.378 | signatures | 112 |
+| `browser/style.css` | 0.378 | signatures | 14 |
+| `pyproject.toml` | 0.368 | one-liner | 12 |
+| `inferr/context/__init__.py` | 0.361 | one-liner | 23 |
+| `inferr/__init__.py` | 0.312 | one-liner | 18 |
+| `tests/test_tts_preprocessing.py` | 0.304 | one-liner | 23 |
+| `browser/index.html` | 0.303 | one-liner | 11 |
+| `tests/test_llm_prompt.py` | 0.296 | one-liner | 22 |
+| `typings/ptyprocess.pyi` | 0.295 | one-liner | 22 |
+| `tests/test_errors.py` | 0.292 | one-liner | 20 |
+| `requirements.txt` | 0.261 | one-liner | 10 |
+| `PROJECT_CONTEXT.md` | 0.253 | one-liner | 11 |
+| `README.md` | 0.252 | one-liner | 10 |
+| `inferr/context/files.py` | 0.248 | one-liner | 26 |
+| `inferr/debug.py` | 0.233 | one-liner | 20 |
+| `typings/pyttsx3.pyi` | 0.195 | one-liner | 23 |
+| `inferr/context/history.py` | 0.190 | one-liner | 21 |
+| `inferr/shell/inferr.bash` | 0.145 | one-liner | 17 |
+| `inferr/shell/inferr.zsh` | 0.145 | one-liner | 17 |
+| `.gitignore` | 0.115 | one-liner | 10 |
 
 ## PERIPHERY
 
-- `tests/test_llm.py` — 9 functions, 5 imports, 228 lines
-- `tests/test_context.py` — 16 functions, 14 imports, 285 lines
+- `tests/test_llm.py` — 9 functions, 5 imports, 227 lines
 - `tests/test_server.py` — 13 functions, 7 imports, 203 lines
+- `tests/test_context.py` — 16 functions, 14 imports, 285 lines
+- `tests/test_tts.py` — 21 functions, 12 imports, 274 lines
 - `pyproject.toml` — 54 lines
-- `tests/test_tts.py` — 18 functions, 5 imports, 163 lines
-- `inferr/context/__init__.py` — 1 class, 8 imports, 72 lines
-- `browser/app.js` — 19 functions, 488 lines
-- `browser/index.html` — 95 lines
-- `browser/style.css` — 433 lines
-- `tests/test_errors.py` — 15 functions, 3 imports, 177 lines
+- `inferr/context/__init__.py` — 1 class, 9 imports, 76 lines
 - `inferr/__init__.py` — 1 imports, 10 lines
+- `tests/test_tts_preprocessing.py` — 9 functions, 1 imports, 54 lines
+- `browser/index.html` — 95 lines
+- `tests/test_llm_prompt.py` — 16 functions, 1 imports, 102 lines
 - `typings/ptyprocess.pyi` — 1 class, 1 imports, 20 lines
+- `tests/test_errors.py` — 15 functions, 3 imports, 177 lines
 - `requirements.txt` — 71 lines
-- `inferr/context/files.py` — 2 classs, 1 function, 8 imports, 129 lines
 - `PROJECT_CONTEXT.md` — 266 lines
 - `README.md` — 50 lines
-- `tests/test_tts_preprocessing.py` — 9 functions, 1 imports, 54 lines
-- `tests/test_llm_prompt.py` — 8 functions, 1 imports, 48 lines
+- `inferr/context/files.py` — 2 classs, 1 function, 8 imports, 129 lines
+- `inferr/debug.py` — 1 class, 4 imports, 41 lines
 - `typings/pyttsx3.pyi` — 1 class, 1 function, 9 lines
 - `inferr/context/history.py` — 2 functions, 3 imports, 48 lines
 - `inferr/shell/inferr.bash` — 27 lines

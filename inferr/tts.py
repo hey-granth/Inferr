@@ -11,6 +11,7 @@ import pyttsx3
 
 from inferr.config import Config
 from inferr.models import SilkConfig
+from inferr.debug import debug_logger
 
 _VALID_TONES = {"neutral", "urgent", "warm"}
 _TTS_TRUNCATE_LIMIT = 800
@@ -26,6 +27,14 @@ _HINGLISH_HINTS = {
     "pe",
     "se",
 }
+
+_TTS_MIN_TIMEOUT = 12.0
+_TTS_MAX_TIMEOUT = 45.0
+
+def tts_timeout_seconds(text: str) -> float:
+    # Estimate: ~18 chars/sec, plus base buffer for startup latency.
+    est = 8.0 + (max(len(text), 1) / 18.0)
+    return max(_TTS_MIN_TIMEOUT, min(_TTS_MAX_TIMEOUT, est))
 
 class _PreparedTTSText(str):
     __slots__ = ("_plain",)
@@ -170,6 +179,13 @@ class SilkTTSBackend(TTSBackend):
 
     async def speak(self, text: str, tone: str = "neutral") -> None:
         _validate_tone(tone)
+        
+        debug_logger.log_stage("tts_start", {
+            "backend": "silk",
+            "tone": tone,
+            "text_length": len(text)
+        })
+        
         processed_text = self._preprocess_text(text, tone)
         await self._send_to_silk_api(processed_text, tone)
 
@@ -276,6 +292,12 @@ class SilkTTSBackend(TTSBackend):
                                 break
                 finally:
                     elapsed_ms = int((asyncio.get_running_loop().time() - start_time) * 1000)
+                    debug_logger.log_stage("tts_silk_stream_end", {
+                        "chunk_count": chunk_count,
+                        "total_bytes": total_bytes,
+                        "elapsed_ms": elapsed_ms
+                    })
+                    
                     await self._ws_connection.send_text(
                         json.dumps(
                             {
@@ -322,6 +344,10 @@ class SilkTTSBackend(TTSBackend):
                         file=sys.stderr,
                     )
                     return
+
+                debug_logger.log_stage("tts_silk_full_end", {
+                    "total_bytes": len(resp.content),
+                })
 
                 await self._ws_connection.send_bytes(resp.content)
                 await self._ws_connection.send_text(

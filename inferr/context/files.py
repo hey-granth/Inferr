@@ -72,7 +72,7 @@ class FileWatcher:
         except ValueError:
             return
 
-        if len(relative.parts) > 2:
+        if len(relative.parts) > 8:
             return
 
         if any(part in self._config.ignored_dirs for part in relative.parts):

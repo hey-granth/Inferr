@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from inferr.config import Config
 from inferr.models import ContextObject, ConversationTurn
@@ -59,6 +60,8 @@ class ContextAssembler:
 
         limited_history = conversation_history[-6:]
         timestamp = datetime.now(timezone.utc)
+        
+        git_repo = Path.cwd().name
 
         return ContextObject(
             terminal_buffer=terminal_buffer,
@@ -68,4 +71,5 @@ class ContextAssembler:
             conversation_history=limited_history,
             session_id=session_id,
             timestamp=timestamp,
+            git_repo=git_repo,
         )

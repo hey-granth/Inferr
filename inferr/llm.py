@@ -9,6 +9,7 @@ from google.genai import types as genai_types
 
 from inferr.config import Config
 from inferr.models import QueryRequest
+from inferr.debug import debug_logger
 
 
 # Keywords indicating high-signal terminal lines that should be prioritized
@@ -87,7 +88,15 @@ def build_system_prompt(language: str, tone: str = "neutral") -> str:
     if tone == "urgent":
         urgency_note = "\nContext: errors are flagged. Lead with the specific error and line if visible."
 
-    return f"{operational_rules}\n\n{style}{urgency_note}"
+    prompt = f"{operational_rules}\n\n{style}{urgency_note}"
+    
+    debug_logger.log_stage("system_prompt_assembly", {
+        "language": language,
+        "tone": tone,
+        "final_prompt": prompt
+    })
+    
+    return prompt
 
 
 def _shorten_line(value: str, max_len: int = 120) -> str:
@@ -113,6 +122,9 @@ def _summarize_context(request: QueryRequest) -> str:
         if context.active_file is not None
         else None
     )
+    
+    # ADDED logic to include repository details if available
+    repo_name = context.git_repo if hasattr(context, 'git_repo') else None
 
     real_errors = [e for e in context.flagged_errors if e.type != "marker"]
     error_summaries = [_shorten_line(e.summary) for e in real_errors[:3]]
@@ -145,9 +157,22 @@ def _summarize_context(request: QueryRequest) -> str:
 
     if active_file:
         sections.append(f"\nActive file: {active_file}")
+        
+    if repo_name:
+        sections.append(f"\nRepository: {repo_name}")
 
     sections.append(f'\nUser said: "{request.transcript}"')
-    return "\n".join(sections)
+    
+    final_summary = "\n".join(sections)
+    
+    debug_logger.log_stage("context_summarization", {
+        "active_file_tracked": bool(active_file),
+        "terminal_lines_included": len(terminal_events),
+        "error_count": len(error_summaries),
+        "final_summary": final_summary
+    })
+    
+    return final_summary
 
 
 async def query_llm(
@@ -175,7 +200,7 @@ async def query_llm(
 
     generate_config = genai_types.GenerateContentConfig(
         system_instruction=system_prompt,
-        max_output_tokens=220,
+        max_output_tokens=1024, # Increased token limit to prevent mid-sentence truncation
         temperature=0.2,
     )
 
@@ -183,6 +208,13 @@ async def query_llm(
         config.gemini.api_keys if config.gemini.api_keys else [config.gemini.api_key]
     )
     last_exc: Exception | None = None
+
+    debug_logger.log_stage("llm_request_start", {
+        "model": config.gemini.model,
+        "temperature": generate_config.temperature,
+        "max_output_tokens": generate_config.max_output_tokens,
+        "user_content": user_content
+    })
 
     for api_key in keys_to_try:
         if not api_key:
@@ -203,12 +235,29 @@ async def query_llm(
                     contents=history,
                     config=generate_config,
                 )
-            if not response.candidates:
-                return ""
-            candidate = response.candidates[0]
-            if not candidate.content or not candidate.content.parts:
-                return ""
-            return candidate.content.parts[0].text or ""
+            
+            raw_response_text = ""
+            finish_reason = None
+            if response.candidates:
+                candidate = response.candidates[0]
+                finish_reason = getattr(candidate, "finish_reason", "unknown")
+                if candidate.content and candidate.content.parts:
+                    raw_response_text = candidate.content.parts[0].text or ""
+            
+            # Check if generation was truncated due to length
+            clean_end = finish_reason in ["STOP", 1, "unknown"] if finish_reason else True
+            if finish_reason in ["MAX_TOKENS", 2]:
+                clean_end = False
+            
+            debug_logger.log_stage("llm_raw_response", {
+                "model": config.gemini.model,
+                "response_length": len(raw_response_text),
+                "finish_reason": str(finish_reason),
+                "clean_end": clean_end,
+                "raw_response": raw_response_text
+            })
+            
+            return raw_response_text
         except Exception as exc:
             last_exc = exc
             exc_str = str(exc).lower()
@@ -218,6 +267,11 @@ async def query_llm(
                 or "quota" in exc_str
             ):
                 continue
+            
+            debug_logger.log_stage("llm_request_failed", {
+                "error": str(exc),
+                "model": config.gemini.model
+            })
             raise RuntimeError(f"Gemini API error: {exc}") from exc
 
     if len(keys_to_try) <= 1 and last_exc is not None:

@@ -32,6 +32,7 @@ class ContextObject(BaseModel):
     conversation_history: list[ConversationTurn]
     session_id: str
     timestamp: datetime
+    git_repo: str | None = None
 
 
 class SilkConfig(BaseModel):

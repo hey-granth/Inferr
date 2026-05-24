@@ -27,7 +27,8 @@ from inferr.models import (
     ShellCommandCapture,
     WebSocketMessage,
 )
-from inferr.tts import SilkTTSBackend, TTSBackend, get_tts_backend
+from inferr.tts import SilkTTSBackend, TTSBackend, get_tts_backend, tts_timeout_seconds
+from inferr.debug import debug_logger
 
 logger = logging.getLogger("inferr.server")
 
@@ -39,14 +40,6 @@ last_activity: datetime | None = None
 
 _shell_command_buffer: list[str] = []
 _SHELL_BUFFER_MAX = 200
-
-_TTS_MIN_TIMEOUT = 12.0
-_TTS_MAX_TIMEOUT = 45.0
-
-def _tts_timeout_seconds(text: str) -> float:
-    # Estimate: ~18 chars/sec, plus base buffer for startup latency.
-    est = 8.0 + (max(len(text), 1) / 18.0)
-    return max(_TTS_MIN_TIMEOUT, min(_TTS_MAX_TIMEOUT, est))
 
 
 def get_shell_command_buffer() -> list[str]:
@@ -264,6 +257,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     """Handle WebSocket transcript streaming and LLM responses."""
     global last_activity
     await websocket.accept()
+    
+    debug_logger.log_stage("websocket_connected", {"client": websocket.client.host if websocket.client else "unknown"})
 
     try:
         if isinstance(tts_backend, SilkTTSBackend):
@@ -359,7 +354,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
                 if tts_backend is not None:
                     try:
-                        tts_timeout = _tts_timeout_seconds(response_text)
+                        tts_timeout = tts_timeout_seconds(response_text)
                         await websocket.send_json(
                             {
                                 "type": "diagnostic",
@@ -402,8 +397,10 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         logger.exception("%s TTS failed: %s", tts_backend.name(), exc)
 
     except WebSocketDisconnect:
+        debug_logger.log_stage("websocket_disconnected", {"reason": "client disconnected"})
         logger.info("WebSocket disconnected.")
     except Exception as exc:
+        debug_logger.log_stage("websocket_error", {"error": str(exc)})
         await websocket.send_json({"type": "error", "message": str(exc)})
         await websocket.close(code=1011)
 
