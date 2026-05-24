@@ -48,6 +48,12 @@ class GeminiConfig(BaseModel):
     model: str = "gemini-2.0-flash"
 
 
+class GroqConfig(BaseModel):
+    api_key: str = ""
+    api_keys: list[str] = Field(default_factory=list)
+    model: str = "llama-3.3-70b-versatile"
+
+
 class DeepgramConfig(BaseModel):
     api_key: str = ""
     model: str = "nova-2"
@@ -72,3 +78,17 @@ class WebSocketMessage(BaseModel):
 class ShellCommandCapture(BaseModel):
     command: str
     exit_code: int = 0
+
+
+class DebugLlmRequest(BaseModel):
+    transcript: str = "hello"
+
+
+class DebugTtsRequest(BaseModel):
+    text: str = "hello from inferr"
+    tone: str = "neutral"
+
+
+class DebugAssistantRequest(BaseModel):
+    transcript: str = "hello"
+    skip_tts: bool = False

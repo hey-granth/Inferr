@@ -8,6 +8,7 @@ import logging
 import os
 from pathlib import Path
 import subprocess
+import time
 import uuid
 import json
 
@@ -22,11 +23,15 @@ from inferr.llm import query_llm
 from inferr.models import (
     ContextObject,
     ConversationTurn,
+    DebugAssistantRequest,
+    DebugLlmRequest,
+    DebugTtsRequest,
     QueryRequest,
     QueryResponse,
     ShellCommandCapture,
     WebSocketMessage,
 )
+from inferr import pipeline as pipeline_stages
 from inferr.tts import SilkTTSBackend, TTSBackend, get_tts_backend, tts_timeout_seconds
 from inferr.debug import debug_logger
 
@@ -40,6 +45,9 @@ last_activity: datetime | None = None
 
 _shell_command_buffer: list[str] = []
 _SHELL_BUFFER_MAX = 200
+
+# Active /ws client — used by Silk TTS debug path when no transcript flow is running.
+_main_websocket: WebSocket | None = None
 
 
 def get_shell_command_buffer() -> list[str]:
@@ -169,6 +177,213 @@ async def browser_config() -> dict[str, object]:
     }
 
 
+def _empty_debug_context(session_label: str = "debug") -> ContextObject:
+    return ContextObject(
+        terminal_buffer=[],
+        shell_history=[],
+        active_file=None,
+        flagged_errors=[],
+        conversation_history=[],
+        session_id=session_label,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+
+async def _emit_stage(websocket: WebSocket | None, stage: str, **kwargs: object) -> None:
+    payload = pipeline_stages.log_pipeline_stage(stage, **kwargs)  # type: ignore[arg-type]
+    if websocket is not None:
+        try:
+            await websocket.send_json(payload)
+        except RuntimeError:
+            pass
+
+
+async def _run_tts(
+    websocket: WebSocket | None,
+    text: str,
+    tone: str,
+) -> bool:
+    """Run TTS; emit TTS_OK / TTS_FAILED. Returns True on success."""
+    if tts_backend is None:
+        await _emit_stage(
+            websocket,
+            pipeline_stages.TTS_FAILED,
+            ok=False,
+            error="no TTS backend configured",
+        )
+        return False
+
+    if isinstance(tts_backend, SilkTTSBackend):
+        if websocket is None:
+            await _emit_stage(
+                websocket,
+                pipeline_stages.TTS_FAILED,
+                ok=False,
+                error="Silk TTS requires an open /ws connection",
+            )
+            return False
+        tts_backend.set_ws_connection(websocket)
+
+    tts_start = time.monotonic()
+    try:
+        tts_timeout = tts_timeout_seconds(text)
+        await asyncio.wait_for(
+            tts_backend.speak(text, tone=tone),
+            timeout=tts_timeout,
+        )
+        await _emit_stage(
+            websocket,
+            pipeline_stages.TTS_OK,
+            detail=pipeline_stages.timed_detail(
+                tts_start,
+                backend=tts_backend.name(),
+                text_len=len(text),
+            ),
+        )
+        return True
+    except TimeoutError:
+        await _emit_stage(
+            websocket,
+            pipeline_stages.TTS_FAILED,
+            ok=False,
+            error=f"{tts_backend.name()} timed out",
+            detail={"timeout_s": tts_timeout},
+        )
+        return False
+    except Exception as exc:
+        await _emit_stage(
+            websocket,
+            pipeline_stages.TTS_FAILED,
+            ok=False,
+            error=str(exc),
+            detail={"backend": tts_backend.name()},
+        )
+        return False
+
+
+async def _handle_transcript(
+    websocket: WebSocket,
+    transcript: str,
+    *,
+    source: str = "websocket",
+) -> None:
+    """LLM → response JSON → TTS. Shared by live STT and debug transcript injection."""
+    global last_activity
+
+    trimmed = transcript.strip()
+    if not trimmed:
+        await _emit_stage(
+            websocket,
+            pipeline_stages.TRANSCRIPT_EMPTY,
+            ok=False,
+            error="empty transcript",
+        )
+        return
+
+    await _emit_stage(
+        websocket,
+        pipeline_stages.TRANSCRIPT_FINALIZED,
+        detail={"transcript": trimmed, "source": source},
+    )
+
+    if session_id is None or context_assembler is None:
+        await _emit_stage(
+            websocket,
+            pipeline_stages.ASSISTANT_FAILED,
+            ok=False,
+            error="no active session",
+        )
+        await websocket.send_json(
+            {"type": "error", "message": "No active session"}
+        )
+        return
+
+    context = context_assembler.assemble(session_id, conversation_history)
+    tone = resolve_tone(context)
+    request = QueryRequest(transcript=trimmed, context=context)
+
+    llm_start = time.monotonic()
+    try:
+        response_text = await query_llm(request, get_config(), tone=tone)
+    except Exception as exc:
+        await _emit_stage(
+            websocket,
+            pipeline_stages.LLM_FAILED,
+            ok=False,
+            error=str(exc),
+            detail=pipeline_stages.timed_detail(llm_start),
+        )
+        await _emit_stage(
+            websocket,
+            pipeline_stages.ASSISTANT_FAILED,
+            ok=False,
+            error="LLM failed",
+        )
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        return
+
+    await _emit_stage(
+        websocket,
+        pipeline_stages.LLM_OK,
+        detail=pipeline_stages.timed_detail(
+            llm_start,
+            response_len=len(response_text),
+            model=get_config().groq.model,
+        ),
+    )
+
+    conversation_history.append(
+        ConversationTurn(role="user", content=trimmed)
+    )
+    conversation_history.append(
+        ConversationTurn(role="assistant", content=response_text)
+    )
+    if len(conversation_history) > 6:
+        conversation_history[:] = conversation_history[-6:]
+
+    last_activity = datetime.now(timezone.utc)
+
+    has_errors = any(
+        flagged_error.type != "marker"
+        for flagged_error in context.flagged_errors
+    )
+    backend_name = tts_backend.name() if tts_backend is not None else "browser"
+
+    active_file_name = None
+    if context.active_file is not None:
+        active_file_name = Path(context.active_file.path).name
+
+    context_stats = {
+        "terminal_lines": len(context.terminal_buffer),
+        "active_file": active_file_name,
+        "error_count": sum(
+            1 for e in context.flagged_errors if e.type != "marker"
+        ),
+    }
+
+    response_payload = {
+        "type": "response",
+        "text": response_text,
+        "has_errors": has_errors,
+        "tone": tone,
+        "tts_backend": backend_name,
+        "context_stats": context_stats,
+    }
+    await websocket.send_json(response_payload)
+
+    tts_ok = await _run_tts(websocket, response_text, tone)
+    if tts_ok:
+        await _emit_stage(websocket, pipeline_stages.ASSISTANT_OK, detail={"source": source})
+    else:
+        await _emit_stage(
+            websocket,
+            pipeline_stages.ASSISTANT_FAILED,
+            ok=False,
+            error="TTS failed after LLM succeeded",
+            detail={"llm_response_len": len(response_text)},
+        )
+
+
 def resolve_tone(context: ContextObject) -> str:
     """
     Returns 'urgent' if real (non-marker) errors are flagged.
@@ -208,7 +423,7 @@ async def speech_to_text_endpoint(websocket: WebSocket) -> None:
         "wss://api.deepgram.com/v1/listen"
         f"?model={cfg.deepgram.model}"
         f"&language={cfg.deepgram.language}"
-        "&punctuate=true&interim_results=false&endpointing=500"
+        "&punctuate=true&interim_results=false&endpointing=700"
         f"&encoding=linear16&sample_rate={stt_sample_rate}&channels=1"
     )
     logger.info("DEEPGRAM_CONNECTING url=%s", deepgram_url)
@@ -317,12 +532,176 @@ async def speech_to_text_endpoint(websocket: WebSocket) -> None:
         await websocket.close(code=1011)
 
 
+@app.post("/debug/pipeline/llm")
+async def debug_pipeline_llm(body: DebugLlmRequest) -> JSONResponse:
+    """Isolate LLM: no STT, websocket transcript, or TTS."""
+    llm_start = time.monotonic()
+    context = _empty_debug_context()
+    if session_id and context_assembler:
+        context = context_assembler.assemble(session_id, conversation_history)
+    tone = resolve_tone(context)
+    request = QueryRequest(transcript=body.transcript, context=context)
+
+    try:
+        text = await query_llm(request, get_config(), tone=tone)
+        stage = pipeline_stages.log_pipeline_stage(
+            pipeline_stages.LLM_OK,
+            detail=pipeline_stages.timed_detail(
+                llm_start,
+                transcript=body.transcript,
+                response_len=len(text),
+                model=get_config().groq.model,
+            ),
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "ok",
+                "response": text,
+                "pipeline_stage": stage,
+            },
+        )
+    except Exception as exc:
+        stage = pipeline_stages.log_pipeline_stage(
+            pipeline_stages.LLM_FAILED,
+            ok=False,
+            error=str(exc),
+            detail=pipeline_stages.timed_detail(llm_start),
+        )
+        return JSONResponse(
+            status_code=502,
+            content={"status": "error", "error": str(exc), "pipeline_stage": stage},
+        )
+
+
+@app.post("/debug/pipeline/tts")
+async def debug_pipeline_tts(body: DebugTtsRequest) -> JSONResponse:
+    """Isolate TTS: no STT or LLM. Silk requires open /ws in browser."""
+    global _main_websocket
+
+    if tts_backend is None:
+        stage = pipeline_stages.log_pipeline_stage(
+            pipeline_stages.TTS_FAILED,
+            ok=False,
+            error="no TTS backend",
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "pipeline_stage": stage},
+        )
+
+    ws = _main_websocket
+    tts_start = time.monotonic()
+    ok = await _run_tts(ws, body.text, body.tone)
+    detail = pipeline_stages.timed_detail(
+        tts_start,
+        backend=tts_backend.name(),
+        ws_connected=ws is not None,
+    )
+    if ok:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "ok",
+                "backend": tts_backend.name(),
+                "detail": detail,
+            },
+        )
+    return JSONResponse(
+        status_code=502,
+        content={
+            "status": "error",
+            "backend": tts_backend.name(),
+            "detail": detail,
+            "hint": "Open the Inferr UI so /ws is connected before testing Silk TTS.",
+        },
+    )
+
+
+@app.post("/debug/pipeline/assistant")
+async def debug_pipeline_assistant(body: DebugAssistantRequest) -> JSONResponse:
+    """Isolate assistant chain (LLM + optional TTS) without STT."""
+    global _main_websocket
+
+    ws = _main_websocket
+    if ws is None:
+        # LLM-only path still works over HTTP
+        if body.skip_tts:
+            llm_start = time.monotonic()
+            context = (
+                context_assembler.assemble(session_id, conversation_history)
+                if session_id and context_assembler
+                else _empty_debug_context()
+            )
+            tone = resolve_tone(context)
+            try:
+                text = await query_llm(
+                    QueryRequest(transcript=body.transcript, context=context),
+                    get_config(),
+                    tone=tone,
+                )
+                return JSONResponse(
+                    content={
+                        "status": "ok",
+                        "response": text,
+                        "pipeline_stage": pipeline_stages.log_pipeline_stage(
+                            pipeline_stages.LLM_OK,
+                            detail=pipeline_stages.timed_detail(llm_start),
+                        ),
+                    }
+                )
+            except Exception as exc:
+                return JSONResponse(
+                    status_code=502,
+                    content={"status": "error", "error": str(exc)},
+                )
+
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "error": "No /ws client connected. Open the UI for full assistant+TTS test.",
+                "hint": "Use window.inferrDebug.invokeAssistant(text) in the browser console.",
+            },
+        )
+
+    await _handle_transcript(ws, body.transcript, source="debug_http")
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "message": "Assistant pipeline invoked on active websocket client.",
+        },
+    )
+
+
+@app.get("/debug/pipeline/status")
+async def debug_pipeline_status() -> dict[str, object]:
+    """Which pipeline boundaries are currently reachable."""
+    cfg = get_config()
+    return {
+        "session_active": session_id is not None,
+        "ws_connected": _main_websocket is not None,
+        "tts_backend": tts_backend.name() if tts_backend else None,
+        "groq_configured": bool(cfg.groq.api_key),
+        "deepgram_configured": bool(cfg.deepgram.api_key),
+        "stages": [
+            pipeline_stages.STT_OK,
+            pipeline_stages.TRANSCRIPT_FINALIZED,
+            pipeline_stages.LLM_OK,
+            pipeline_stages.TTS_OK,
+            pipeline_stages.PLAYBACK_STARTED,
+            pipeline_stages.PLAYBACK_COMPLETED,
+        ],
+    }
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     """Handle WebSocket transcript streaming and LLM responses."""
-    global last_activity
+    global _main_websocket
     await websocket.accept()
-    
+    _main_websocket = websocket
+
     debug_logger.log_stage("websocket_connected", {"client": websocket.client.host if websocket.client else "unknown"})
 
     try:
@@ -343,123 +722,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 continue
 
             if message.type == "transcript":
-                if session_id is None or context_assembler is None:
-                    await websocket.send_json(
-                        {"type": "error", "message": "No active session"}
-                    )
-                    continue
-
-                context = context_assembler.assemble(session_id, conversation_history)
-                tone = resolve_tone(context)
-                request = QueryRequest(transcript=message.payload, context=context)
-                response_text = await query_llm(request, get_config(), tone=tone)
-                response_len = len(response_text)
-
-                conversation_history.append(
-                    ConversationTurn(role="user", content=message.payload)
+                await _handle_transcript(
+                    websocket, message.payload, source="websocket"
                 )
-                conversation_history.append(
-                    ConversationTurn(role="assistant", content=response_text)
-                )
-                if len(conversation_history) > 6:
-                    conversation_history[:] = conversation_history[-6:]
-
-                last_activity = datetime.now(timezone.utc)
-
-                has_errors = any(
-                    flagged_error.type != "marker"
-                    for flagged_error in context.flagged_errors
-                )
-                backend_name = (
-                    tts_backend.name() if tts_backend is not None else "browser"
-                )
-
-                active_file_name = None
-                if context.active_file is not None:
-                    active_file_name = Path(context.active_file.path).name
-
-                context_stats = {
-                    "terminal_lines": len(context.terminal_buffer),
-                    "active_file": active_file_name,
-                    "error_count": sum(
-                        1 for e in context.flagged_errors if e.type != "marker"
-                    ),
-                }
-
-                response_payload = {
-                    "type": "response",
-                    "text": response_text,
-                    "has_errors": has_errors,
-                    "tone": tone,
-                    "tts_backend": backend_name,
-                    "context_stats": context_stats,
-                }
-                await websocket.send_json(response_payload)
-
-                try:
-                    payload_bytes = len(json.dumps(response_payload).encode("utf-8"))
-                except (TypeError, ValueError):
-                    payload_bytes = 0
-                await websocket.send_json(
-                    {
-                        "type": "diagnostic",
-                        "stage": "llm_response",
-                        "response_len": response_len,
-                        "payload_bytes": payload_bytes,
-                        "tts_backend": backend_name,
-                    }
-                )
-
-                logger.info(
-                    "LLM response len=%s payload_bytes=%s backend=%s",
-                    response_len,
-                    payload_bytes,
-                    backend_name,
-                )
-
-                if tts_backend is not None:
-                    try:
-                        tts_timeout = tts_timeout_seconds(response_text)
-                        await websocket.send_json(
-                            {
-                                "type": "diagnostic",
-                                "stage": "tts_start",
-                                "timeout_s": tts_timeout,
-                                "response_len": response_len,
-                            }
-                        )
-                        tts_start = asyncio.get_running_loop().time()
-                        await asyncio.wait_for(
-                            tts_backend.speak(response_text, tone=tone),
-                            timeout=tts_timeout,
-                        )
-                        tts_elapsed = int(
-                            (asyncio.get_running_loop().time() - tts_start) * 1000
-                        )
-                        await websocket.send_json(
-                            {
-                                "type": "diagnostic",
-                                "stage": "tts_end",
-                                "elapsed_ms": tts_elapsed,
-                                "response_len": response_len,
-                            }
-                        )
-                    except NotImplementedError as exc:
-                        logger.info(
-                            "%s backend not active yet: %s", tts_backend.name(), exc
-                        )
-                    except TimeoutError:
-                        logger.warning("%s TTS timed out", tts_backend.name())
-                        await websocket.send_json(
-                            {
-                                "type": "diagnostic",
-                                "stage": "tts_timeout",
-                                "timeout_s": tts_timeout,
-                                "response_len": response_len,
-                            }
-                        )
-                    except Exception as exc:
-                        logger.exception("%s TTS failed: %s", tts_backend.name(), exc)
 
     except WebSocketDisconnect:
         debug_logger.log_stage("websocket_disconnected", {"reason": "client disconnected"})
@@ -468,6 +733,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         debug_logger.log_stage("websocket_error", {"error": str(exc)})
         await websocket.send_json({"type": "error", "message": str(exc)})
         await websocket.close(code=1011)
+    finally:
+        if _main_websocket is websocket:
+            _main_websocket = None
 
 
 @app.post("/capture/command")

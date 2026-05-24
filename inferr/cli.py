@@ -70,10 +70,10 @@ def start(
 ) -> None:
     """Start the Inferr server and initialize a session."""
     config = load_config()
-    if not config.gemini.api_key:
+    if not config.gemini.api_key and not config.groq.api_key:
         click.echo(
-            "[inferr] ERROR: GEMINI_API_KEY is not set. "
-            "Add it to your .env file or export it as an environment variable.",
+            "[inferr] ERROR: No LLM API key set. "
+            "Add GROQ_API_KEY or GEMINI_API_KEY to your .env file.",
             err=True,
         )
         raise SystemExit(1)
@@ -169,6 +169,82 @@ def logs(n: Optional[int]) -> None:
         click.echo("Inferr is not running. Start it with `inferr start`.")
     except httpx.HTTPError:
         click.echo("Failed to fetch logs.")
+
+
+def _debug_base_url() -> str:
+    config = load_config()
+    port_value = _resolve_port(config, None)
+    return f"http://{config.host}:{port_value}"
+
+
+@cli.group()
+def debug() -> None:
+    """Pipeline isolation tests — one subsystem at a time."""
+
+
+@debug.command("llm")
+@click.argument("text", default="hello")
+def debug_llm(text: str) -> None:
+    """Test Groq LLM only (no STT, TTS, or websocket)."""
+    base_url = _debug_base_url()
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            response = client.post(
+                f"{base_url}/debug/pipeline/llm",
+                json={"transcript": text},
+            )
+        data = response.json()
+        stage = data.get("pipeline_stage", {})
+        click.echo(f"PIPELINE_{stage.get('stage', '?')}: {'OK' if stage.get('ok') else 'FAILED'}")
+        if stage.get("detail"):
+            click.echo(f"detail: {stage.get('detail')}")
+        if response.status_code == 200:
+            click.echo(f"response: {data.get('response', '')}")
+        else:
+            click.echo(f"error: {data.get('error', data)}", err=True)
+            raise SystemExit(1)
+    except httpx.ConnectError:
+        click.echo("Inferr is not running. Start it with `inferr start`.", err=True)
+        raise SystemExit(1)
+
+
+@debug.command("tts")
+@click.argument("text", default="hello from inferr")
+@click.option("--tone", default="neutral")
+def debug_tts(text: str, tone: str) -> None:
+    """Test TTS only. Silk needs the browser UI open on /ws."""
+    base_url = _debug_base_url()
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            response = client.post(
+                f"{base_url}/debug/pipeline/tts",
+                json={"text": text, "tone": tone},
+            )
+        data = response.json()
+        click.echo(f"status: {data.get('status')}")
+        if data.get("detail"):
+            click.echo(f"detail: {data.get('detail')}")
+        if data.get("hint"):
+            click.echo(f"hint: {data.get('hint')}")
+        if response.status_code != 200:
+            raise SystemExit(1)
+    except httpx.ConnectError:
+        click.echo("Inferr is not running. Start it with `inferr start`.", err=True)
+        raise SystemExit(1)
+
+
+@debug.command("status")
+def debug_status() -> None:
+    """Show which pipeline stages can run right now."""
+    base_url = _debug_base_url()
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            response = client.get(f"{base_url}/debug/pipeline/status")
+        for key, value in response.json().items():
+            click.echo(f"{key}: {value}")
+    except httpx.ConnectError:
+        click.echo("Inferr is not running.", err=True)
+        raise SystemExit(1)
 
 
 @cli.command("install-shell")

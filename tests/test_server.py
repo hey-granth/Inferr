@@ -123,9 +123,14 @@ def test_websocket_no_session_returns_error(
     with TestClient(server_module.app) as client:
         with client.websocket_connect("/ws") as ws:
             ws.send_json({"type": "transcript", "payload": "hello"})
-            data = ws.receive_json()
-            assert data["type"] == "error"
-            assert "No active session" in data["message"]
+            error_payload = None
+            for _ in range(8):
+                data = ws.receive_json()
+                if data["type"] == "error":
+                    error_payload = data
+                    break
+            assert error_payload is not None
+            assert "No active session" in error_payload["message"]
 
 
 def test_resolve_tone_urgent_with_errors() -> None:
