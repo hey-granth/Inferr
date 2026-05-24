@@ -27,7 +27,7 @@ Project summary
   - Watch active files in the workspace and send a snippet to the LLM as part of context
   - Detect errors (Python tracebacks, uvicorn/ASGI errors, HTTP 4xx/5xx, git conflicts, Go panics, Node errors)
   - Expose a FastAPI server and a browser UI that connects via WebSocket to stream transcripts and receive LLM responses
-  - Provide multiple TTS backends (Silk (Rumik), ElevenLabs, pyttsx3, or browser speech synthesis fallback)
+  - Provide multiple TTS backends (Silk (Rumik), pyttsx3, or browser speech synthesis fallback)
   - Provide a CLI (`inferr` entry point) to start/stop the server and install shell integration
 
 Repository layout (relevant files)
@@ -96,7 +96,6 @@ Configuration & environment variables
   - GEMINI_API_KEY (or set in config gemini.api_key) — required LLM API key(s). Multiple keys may be comma-separated.
   - GEMINI_MODEL — choose Gemini model override (defaults exist in config)
   - SILK_API_KEY / SILK_API_URL — Silk (Rumik) TTS API key and endpoint
-  - ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID — ElevenLabs TTS
   - DEEPGRAM_API_KEY — for browser STT (Deepgram). If missing, the browser mic is disabled.
   - INFERR_PORT — overrides port, used by cli/server glue logic
   - INFERR_NO_BROWSER — if set to "1" prevents the server from attempting to open a browser window
@@ -133,7 +132,7 @@ High-level runtime flow
    - Sends transcript + context to `inferr.llm.query_llm()` which builds system prompt (language-aware) and calls Gemini API.
    - Appends assistant/user messages to the in-memory conversation history.
    - Returns a `response` object on the WebSocket: { type: "response", text, has_errors, tone, tts_backend, context_stats }
-   - Optionally invokes the configured TTS backend to speak the response (Silk may stream bytes back to the browser over WebSocket; ElevenLabs may stream or send full bytes; pyttsx3 runs locally in a thread; browser fallback uses Web Speech API on the client).
+   - Optionally invokes the configured TTS backend to speak the response (Silk may stream bytes back to the browser over WebSocket; pyttsx3 runs locally in a thread; browser fallback uses Web Speech API on the client).
 
 
 LLM integration (`inferr/llm.py`)
@@ -195,7 +194,7 @@ Server API & WebSocket protocols (`inferr/server.py`)
     - { type: "ping", payload: "" } => server replies { type: "pong" }
     - { type: "transcript", payload: "...user utterance..." } => server validates session and passes transcript+context to LLM, then sends response object:
        { type: "response", text: <string>, has_errors: bool, tone: <urgent|warm|neutral>, tts_backend: <name>, context_stats: { terminal_lines, active_file, error_count } }
-  - When TTS backends stream bytes (Silk or ElevenLabs), the server forwards binary frames to the browser WebSocket and also sends a JSON { type: "silk_end" } marker when streaming completes. The browser collects binary chunks and plays them with WebAudio.
+  - When TTS backends stream bytes (Silk), the server forwards binary frames to the browser WebSocket and also sends a JSON { type: "silk_end" } marker when streaming completes. The browser collects binary chunks and plays them with WebAudio.
 
 
 TTS backends (`inferr/tts.py`)
@@ -204,14 +203,12 @@ TTS backends (`inferr/tts.py`)
   - Supported tones: `neutral`, `urgent`, `warm` — used to alter marker/timbre or voice settings.
 - Provided backends (get_tts_backend picks the highest-priority available):
   1) SilkTTSBackend (Rumik) — supports streaming to browser via intermediate Silk WS; implementation has a docstring describing how to integrate. NOTE: If silk.api_url is defaulted to `https://api.silk.ai` and no credentials exist, a NotImplementedError is raised. The code contains an implementation that posts to silk endpoints when configured.
-  2) ElevenLabsTTSBackend — uses `elevenlabs` python client; supports streaming or full bytes depending on config; requires ELEVENLABS_API_KEY.
   3) Pyttsx3TTSBackend — local offline TTS (pyttsx3) if available. Run in a background thread in server to avoid blocking.
   4) BrowserTTSBackend — fallback that does nothing on server-side; the browser uses Web Speech API to speak responses via `speechSynthesis`.
 
 Notes & caveats about TTS:
 - Silk streaming path is implemented to stream binary frames to the browser WebSocket. The browser collects Int16 audio chunks and uses WebAudio to play them (24kHz assumed).
 - The Silk path contains a guard: if config.api_url equals `https://api.silk.ai` (placeholder), it raises NotImplementedError telling developer to set SILK_API_KEY and silk.api_url. The tests expect this behavior.
-- ElevenLabs integration uses the `elevenlabs` Python client and will raise runtime RuntimeError on API errors. It expects a WebSocket connection from the browser to send audio bytes.
 
 
 Shell integration plugin
@@ -252,11 +249,11 @@ Appendix — quick reference (short)
 
 - Start locally: `inferr start`
 - Config path: `~/.inferr/config.toml`
-- Required API keys: `GEMINI_API_KEY` (LLM). Optional: `DEEPGRAM_API_KEY` (STT), `SILK_API_KEY` (TTS), `ELEVENLABS_API_KEY` (TTS)
+- Required API keys: `GEMINI_API_KEY` (LLM). Optional: `DEEPGRAM_API_KEY` (STT), `SILK_API_KEY` (TTS)
 - Main server file: `inferr/server.py` (WebSocket endpoints: `/ws`, `/ws/stt`)
 - LLM wrapper: `inferr/llm.py`
 - Error detection: `inferr/context/errors.py`
-- TTS: `inferr/tts.py` (Silk/ElevenLabs/pyttsx3/browser)
+- TTS: `inferr/tts.py` (Silk/pyttsx3/browser)
 - Context assembly: `inferr/context/__init__.py` (uses `terminal.py`, `files.py`, `history.py`)
 
 

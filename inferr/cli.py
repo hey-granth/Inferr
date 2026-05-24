@@ -211,4 +211,3 @@ def install_shell(shell_name: Optional[str]) -> None:
 
     click.echo(f"Installed inferr shell plugin to {rc_file}.")
     click.echo(f"Run: source {rc_file}")
-

@@ -6,12 +6,10 @@ from typing import Any, SupportsIndex, cast
 import re
 import sys
 
-from elevenlabs import ElevenLabs
-from elevenlabs.core import ApiError as ElevenLabsAPIError
 import pyttsx3
 
 from inferr.config import Config
-from inferr.models import ElevenLabsConfig, SilkConfig
+from inferr.models import SilkConfig
 
 _VALID_TONES = {"neutral", "urgent", "warm"}
 _HINGLISH_HINTS = {
@@ -355,83 +353,11 @@ class BrowserTTSBackend(TTSBackend):
         return "browser"
 
 
-class ElevenLabsTTSBackend(TTSBackend):
-    def __init__(self, config: ElevenLabsConfig) -> None:
-        self._config = config
-        self._client = ElevenLabs(api_key=config.api_key)
-        self._ws_connection: Any | None = None
-
-    def set_ws_connection(self, ws: Any) -> None:
-        self._ws_connection = ws
-
-    def speak(self, text: str, tone: str = "neutral") -> None:
-        _validate_tone(tone)
-        processed = _preprocess_tts_text(text, tone)
-        self._synthesize_and_send(processed, tone)
-
-    def _synthesize_and_send(self, text: str, tone: str) -> None:
-        tone_params_map: dict[str, dict[str, float]] = {
-            "neutral": {"stability": 0.5, "similarity_boost": 0.75},
-            "urgent": {"stability": 0.35, "similarity_boost": 0.85},
-            "warm": {"stability": 0.65, "similarity_boost": 0.70},
-        }
-        tone_params = tone_params_map[tone]
-
-        voice_settings = {
-            "stability": tone_params["stability"],
-            "similarity_boost": tone_params["similarity_boost"],
-        }
-
-        if self._ws_connection is None:
-            print(
-                "[inferr tts] ElevenLabs: no WebSocket connection, skipping audio send",
-                file=sys.stderr,
-            )
-            return
-
-        try:
-            import asyncio
-
-            if self._config.stream:
-                audio_stream = self._client.text_to_speech.stream(
-                    voice_id=self._config.voice_id,
-                    text=text,
-                    model_id=self._config.model_id,
-                    voice_settings=cast(Any, voice_settings),
-                )
-                for chunk in audio_stream:
-                    if chunk:
-                        asyncio.run(self._ws_connection.send_bytes(chunk))
-                asyncio.run(self._ws_connection.send_text('{"type": "silk_end"}'))
-            else:
-                audio_bytes = self._client.text_to_speech.convert(
-                    voice_id=self._config.voice_id,
-                    text=text,
-                    model_id=self._config.model_id,
-                    voice_settings=cast(Any, voice_settings),
-                )
-                asyncio.run(self._ws_connection.send_bytes(audio_bytes))
-                asyncio.run(self._ws_connection.send_text('{"type": "silk_end"}'))
-        except ElevenLabsAPIError as exc:
-            raise RuntimeError(f"ElevenLabs API error: {exc}") from exc
-
-    def is_available(self) -> bool:
-        return bool(self._config.api_key)
-
-    def name(self) -> str:
-        return "elevenlabs"
-
-
 def get_tts_backend(config: Config) -> TTSBackend:
     if config.silk.api_key and config.silk.api_url:
         silk = SilkTTSBackend(config.silk)
         if silk.is_available():
             return silk
-
-    if config.elevenlabs.api_key:
-        elevenlabs = ElevenLabsTTSBackend(config.elevenlabs)
-        if elevenlabs.is_available():
-            return elevenlabs
 
     pyttsx3_backend = Pyttsx3TTSBackend()
     if pyttsx3_backend.is_available():

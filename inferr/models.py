@@ -41,13 +41,6 @@ class SilkConfig(BaseModel):
     stream: bool = True
 
 
-class ElevenLabsConfig(BaseModel):
-    api_key: str = ""
-    voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
-    model_id: str = "eleven_multilingual_v2"
-    stream: bool = True
-
-
 class GeminiConfig(BaseModel):
     api_key: str = ""
     api_keys: list[str] = Field(default_factory=list)

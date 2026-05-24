@@ -50,4 +50,4 @@ def test_no_devanagari_in_output() -> None:
     # Preprocessing must not introduce Devanagari
     result = _preprocess_tts_text("yaar kya chal raha hai", tone="neutral")
     for char in result:
-        assert not ('\u0900' <= char <= '\u097F'), f"Devanagari char found: {char}"
+        assert not ("\u0900" <= char <= "\u097f"), f"Devanagari char found: {char}"

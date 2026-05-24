@@ -45,4 +45,3 @@ def test_english_prompt_no_hindi_words() -> None:
     prompt = build_system_prompt("english")
     assert "bhai" not in prompt.lower()
     assert "yaar" not in prompt.lower()
-

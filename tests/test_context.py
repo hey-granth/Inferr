@@ -14,7 +14,7 @@ from inferr.context.terminal import TerminalCapture
 from inferr.context.errors import extract_errors
 from inferr.context.history import read_shell_history
 from inferr.models import ActiveFile, ConversationTurn, FlaggedError
-from inferr.models import DeepgramConfig, ElevenLabsConfig, GeminiConfig, SilkConfig
+from inferr.models import DeepgramConfig, GeminiConfig, SilkConfig
 
 
 def _base_config() -> Config:
@@ -27,7 +27,6 @@ def _base_config() -> Config:
         host="127.0.0.1",
         port=7331,
         silk=SilkConfig(),
-        elevenlabs=ElevenLabsConfig(),
         gemini=GeminiConfig(),
         deepgram=DeepgramConfig(),
     )
@@ -159,7 +158,6 @@ def test_terminal_capture_inject_line() -> None:
     cap._lock = threading.Lock()
     cap.inject_line("git push origin main")
     assert cap.get_buffer() == ["git push origin main"]
-
 
 
 def test_file_watcher_ignores_ignored_dirs(tmp_path: Path) -> None:

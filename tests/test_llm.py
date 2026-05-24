@@ -9,7 +9,6 @@ from inferr.llm import build_system_prompt, query_llm
 from inferr.models import (
     ContextObject,
     DeepgramConfig,
-    ElevenLabsConfig,
     GeminiConfig,
     QueryRequest,
     SilkConfig,
@@ -54,7 +53,6 @@ def _base_config() -> Config:
         host="127.0.0.1",
         port=7331,
         silk=SilkConfig(),
-        elevenlabs=ElevenLabsConfig(),
         gemini=GeminiConfig(api_key="test-key", model="gemini-flash-latest"),
         deepgram=DeepgramConfig(),
     )

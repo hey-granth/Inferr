@@ -43,7 +43,9 @@ class ContextAssembler:
         terminal_buffer = self._terminal.get_buffer()
 
         # Merge shell plugin commands (real terminal) with file history
-        plugin_commands = list(get_shell_command_buffer()[-self._config.history_depth:])
+        plugin_commands = list(
+            get_shell_command_buffer()[-self._config.history_depth :]
+        )
         file_history = read_shell_history(self._config.history_depth)
 
         # Plugin commands take priority — they are real-time. Use file history as fallback.

@@ -249,7 +249,6 @@ def install_shell(shell_name: Optional[str]) -> None:
 - class `ConversationTurn`
 - class `ContextObject`
 - class `SilkConfig`
-- class `ElevenLabsConfig`
 - class `GeminiConfig`
 - class `DeepgramConfig`
 - class `QueryRequest`
@@ -307,13 +306,6 @@ def install_shell(shell_name: Optional[str]) -> None:
   - `name()`
 - class `BrowserTTSBackend`
   - `speak()`
-  - `is_available()`
-  - `name()`
-- class `ElevenLabsTTSBackend`
-  - `__init__()`
-  - `set_ws_connection()`
-  - `speak()`
-  - `_synthesize_and_send()`
   - `is_available()`
   - `name()`
 - `get_tts_backend()`
@@ -374,7 +366,6 @@ cli.cli()
 - `ContextObject` (bases: `BaseModel`)
 - `ConversationTurn` (bases: `BaseModel`)
 - `DeepgramConfig` (bases: `BaseModel`)
-- `ElevenLabsConfig` (bases: `BaseModel`)
 - `FlaggedError` (bases: `BaseModel`)
 
 ### `inferr/llm.py`
@@ -433,7 +424,6 @@ class Pyttsx3TTSBackend(TTSBackend)
 
 class BrowserTTSBackend(TTSBackend)
 
-class ElevenLabsTTSBackend(TTSBackend)
 
 def get_tts_backend(config: Config) -> TTSBackend
 

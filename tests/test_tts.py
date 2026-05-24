@@ -4,10 +4,9 @@ import io
 import pytest
 
 from inferr.config import Config
-from inferr.models import DeepgramConfig, ElevenLabsConfig, GeminiConfig, SilkConfig
+from inferr.models import DeepgramConfig, GeminiConfig, SilkConfig
 from inferr.tts import (
     BrowserTTSBackend,
-    ElevenLabsTTSBackend,
     Pyttsx3TTSBackend,
     SilkTTSBackend,
     _preprocess_tts_text,
@@ -27,7 +26,6 @@ def _base_config() -> Config:
         host="127.0.0.1",
         port=7331,
         silk=SilkConfig(),
-        elevenlabs=ElevenLabsConfig(),
         gemini=GeminiConfig(),
         deepgram=DeepgramConfig(),
     )
@@ -43,7 +41,6 @@ def test_get_tts_backend_returns_silk_when_configured() -> None:
         host="127.0.0.1",
         port=7331,
         silk=SilkConfig(api_key="key", api_url="https://silk-api.rumik.ai"),
-        elevenlabs=ElevenLabsConfig(),
         gemini=GeminiConfig(),
         deepgram=DeepgramConfig(),
     )
@@ -57,35 +54,12 @@ def test_get_tts_backend_falls_back_to_browser(monkeypatch: pytest.MonkeyPatch) 
     config = _base_config()
 
     monkeypatch.setattr(SilkTTSBackend, "is_available", lambda self: False)
-    monkeypatch.setattr(ElevenLabsTTSBackend, "is_available", lambda self: False)
+
     monkeypatch.setattr(Pyttsx3TTSBackend, "is_available", lambda self: False)
 
     backend = get_tts_backend(config)
 
     assert backend.name() == "browser"
-
-
-def test_get_tts_backend_returns_elevenlabs(monkeypatch: pytest.MonkeyPatch) -> None:
-    config = Config(
-        terminal_buffer_lines=50,
-        history_depth=20,
-        file_lines=150,
-        language="english",
-        ignored_dirs=[".git"],
-        host="127.0.0.1",
-        port=7331,
-        silk=SilkConfig(),
-        elevenlabs=ElevenLabsConfig(api_key="key"),
-        gemini=GeminiConfig(),
-        deepgram=DeepgramConfig(),
-    )
-
-    monkeypatch.setattr(SilkTTSBackend, "is_available", lambda self: False)
-    monkeypatch.setattr(Pyttsx3TTSBackend, "is_available", lambda self: False)
-
-    backend = get_tts_backend(config)
-
-    assert backend.name() == "elevenlabs"
 
 
 def test_silk_backend_raises_not_implemented() -> None:
@@ -154,7 +128,6 @@ def test_preprocess_latin_text_preserved() -> None:
     "backend",
     [
         SilkTTSBackend(SilkConfig()),
-        ElevenLabsTTSBackend(ElevenLabsConfig(api_key="test-key")),
         BrowserTTSBackend(),
         Pyttsx3TTSBackend(),
     ],
@@ -163,11 +136,6 @@ def test_invalid_tone_raises_value_error(backend: object) -> None:
     with pytest.raises(ValueError):
         # type: ignore[attr-defined]
         backend.speak("text", tone="invalid")
-
-
-def test_elevenlabs_backend_name() -> None:
-    backend = ElevenLabsTTSBackend(ElevenLabsConfig(api_key="test-key"))
-    assert backend.name() == "elevenlabs"
 
 
 def test_silk_backend_is_available_with_key() -> None:
@@ -182,34 +150,6 @@ def test_silk_backend_not_available_without_key() -> None:
     backend = SilkTTSBackend(SilkConfig())
 
     assert backend.is_available() is False
-
-
-def test_elevenlabs_not_available_without_key() -> None:
-    backend = ElevenLabsTTSBackend(ElevenLabsConfig(api_key=""))
-    assert backend.is_available() is False
-
-
-def test_elevenlabs_available_with_key() -> None:
-    backend = ElevenLabsTTSBackend(ElevenLabsConfig(api_key="test-key"))
-    assert backend.is_available() is True
-
-
-def test_elevenlabs_invalid_tone_raises() -> None:
-    backend = ElevenLabsTTSBackend(ElevenLabsConfig(api_key="test-key"))
-    with pytest.raises(ValueError):
-        backend.speak("text", tone="robot")
-
-
-def test_elevenlabs_no_ws_connection_logs_and_returns(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    backend = ElevenLabsTTSBackend(ElevenLabsConfig(api_key="test-key"))
-    err = io.StringIO()
-    monkeypatch.setattr("sys.stderr", err)
-
-    backend._synthesize_and_send("text", "neutral")
-
-    assert "no WebSocket connection" in err.getvalue()
 
 
 def test_browser_backend_speak_is_noop() -> None:

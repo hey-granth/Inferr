@@ -200,4 +200,3 @@ async def test_capture_command_exit_code_annotated(
             json={"command": "bad_cmd", "exit_code": 127},
         )
     assert any("exit 127" in entry for entry in server_module._shell_command_buffer)
-

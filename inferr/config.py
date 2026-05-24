@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Mapping, cast
 import tomllib
 
-from inferr.models import DeepgramConfig, ElevenLabsConfig, GeminiConfig, SilkConfig
+from inferr.models import DeepgramConfig, GeminiConfig, SilkConfig
 
 
 @dataclass(frozen=True)
@@ -19,7 +19,6 @@ class Config:
     host: str
     port: int
     silk: SilkConfig = field(default_factory=SilkConfig)
-    elevenlabs: ElevenLabsConfig = field(default_factory=ElevenLabsConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
     deepgram: DeepgramConfig = field(default_factory=DeepgramConfig)
 
@@ -48,12 +47,6 @@ def _default_toml() -> str:
         'api_url = "https://silk-api.rumik.ai"\n'
         'api_key = ""\n'
         'voice_id = "muga"\n'
-        "stream = true\n"
-        "\n"
-        "[elevenlabs]\n"
-        'api_key = ""\n'
-        'voice_id = "JBFqnCBsd6RMkjVDRZzb"\n'
-        'model_id = "eleven_multilingual_v2"\n'
         "stream = true\n"
         "\n"
         "[gemini]\n"
@@ -173,31 +166,6 @@ def load_config() -> Config:
         voice_id=silk_voice_id,
         stream=silk_stream,
     )
-    raw_elevenlabs_obj = data.get("elevenlabs")
-    raw_elevenlabs = (
-        cast(dict[object, object], raw_elevenlabs_obj)
-        if isinstance(raw_elevenlabs_obj, dict)
-        else {}
-    )
-    elevenlabs_api_key = os.environ.get(
-        "ELEVENLABS_API_KEY",
-        _coerce_str(raw_elevenlabs.get("api_key"), ""),
-    )
-    elevenlabs_voice_id = os.environ.get(
-        "ELEVENLABS_VOICE_ID",
-        _coerce_str(raw_elevenlabs.get("voice_id"), "JBFqnCBsd6RMkjVDRZzb"),
-    )
-    elevenlabs_model_id = _coerce_str(
-        raw_elevenlabs.get("model_id"), "eleven_multilingual_v2"
-    )
-    elevenlabs_stream = _coerce_bool(raw_elevenlabs.get("stream"), True)
-    elevenlabs_config = ElevenLabsConfig(
-        api_key=elevenlabs_api_key,
-        voice_id=elevenlabs_voice_id,
-        model_id=elevenlabs_model_id,
-        stream=elevenlabs_stream,
-    )
-
     raw_gemini_obj = data.get("gemini")
     raw_gemini = (
         cast(dict[object, object], raw_gemini_obj)
@@ -255,7 +223,6 @@ def load_config() -> Config:
         host=host,
         port=port,
         silk=silk_config,
-        elevenlabs=elevenlabs_config,
         gemini=gemini_config,
         deepgram=deepgram_config,
     )
