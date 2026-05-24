@@ -331,23 +331,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     }
                 )
 
-                if tts_backend is not None and tts_backend.name() == "silk":
+                if tts_backend is not None:
                     try:
-                        tts_backend.speak(response_text, tone=tone)
+                        await tts_backend.speak(response_text, tone=tone)
                     except NotImplementedError as exc:
-                        logger.info("Silk backend not active yet: %s", exc)
-                    except Exception as exc:
-                        logger.exception("Silk TTS failed: %s", exc)
-                elif tts_backend is not None:
-                    try:
-                        thread = threading.Thread(
-                            target=tts_backend.speak,
-                            args=(response_text, tone),
-                            daemon=True,
+                        logger.info(
+                            "%s backend not active yet: %s", tts_backend.name(), exc
                         )
-                        thread.start()
-                    except RuntimeError:
-                        logger.info("TTS thread failed to start.")
+                    except Exception as exc:
+                        logger.exception("%s TTS failed: %s", tts_backend.name(), exc)
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected.")

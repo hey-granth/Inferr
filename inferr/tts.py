@@ -6,6 +6,7 @@ from typing import Any, SupportsIndex, cast
 import re
 import sys
 
+import asyncio
 import pyttsx3
 
 from inferr.config import Config
@@ -61,7 +62,7 @@ class SilkAPIError(Exception):
 
 class TTSBackend(ABC):
     @abstractmethod
-    def speak(self, text: str, tone: str = "neutral") -> None:
+    async def speak(self, text: str, tone: str = "neutral") -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -167,15 +168,15 @@ class SilkTTSBackend(TTSBackend):
     def set_ws_connection(self, ws: Any) -> None:
         self._ws_connection = ws
 
-    def speak(self, text: str, tone: str = "neutral") -> None:
+    async def speak(self, text: str, tone: str = "neutral") -> None:
         _validate_tone(tone)
         processed_text = self._preprocess_text(text, tone)
-        self._send_to_silk_api(processed_text, tone)
+        await self._send_to_silk_api(processed_text, tone)
 
     def _preprocess_text(self, text: str, tone: str = "neutral") -> str:
         return _preprocess_tts_text(text, tone)
 
-    def _send_to_silk_api(self, text: str, tone: str) -> None:
+    async def _send_to_silk_api(self, text: str, tone: str) -> None:
         """
         NOT YET IMPLEMENTED. Raises NotImplementedError until Silk API credentials
         are available.
@@ -199,7 +200,6 @@ class SilkTTSBackend(TTSBackend):
         - On httpx.TimeoutException: raise SilkAPIError("Silk API timed out")
         - httpx.Client timeout: connect=2.0, read=10.0
         """
-        import asyncio
         import httpx
 
         if self.config.api_url == "https://api.silk.ai":
@@ -215,11 +215,11 @@ class SilkTTSBackend(TTSBackend):
         }
 
         if self.config.stream:
-            with httpx.Client(
+            async with httpx.AsyncClient(
                 timeout=httpx.Timeout(connect=2.0, read=10.0, write=5.0, pool=5.0)
             ) as client:
                 try:
-                    mint_resp = client.post(
+                    mint_resp = await client.post(
                         f"{self.config.api_url}/v1/tts/ws-connect",
                         headers=headers,
                         json={"model": "muga", "text": text},
@@ -242,44 +242,41 @@ class SilkTTSBackend(TTSBackend):
                 ws_url = str(session["ws_url"])
                 token = str(session["token"])
 
-            async def _stream() -> None:
-                import websockets
+            if self._ws_connection is None:
+                print(
+                    "[inferr tts] Silk: no WebSocket connection, skipping",
+                    file=sys.stderr,
+                )
+                return
 
-                if self._ws_connection is None:
-                    print(
-                        "[inferr tts] Silk: no WebSocket connection, skipping",
-                        file=sys.stderr,
+            import websockets
+
+            async with websockets.connect(f"{ws_url}?token={token}") as silk_ws:
+                await silk_ws.send(
+                    json.dumps(
+                        {
+                            "text": text,
+                            "temperature": 0.7,
+                        }
                     )
-                    return
+                )
 
-                async with websockets.connect(f"{ws_url}?token={token}") as silk_ws:
-                    await silk_ws.send(
-                        json.dumps(
-                            {
-                                "text": text,
-                                "temperature": 0.7,
-                            }
-                        )
-                    )
+                async for msg in silk_ws:
+                    if isinstance(msg, bytes):
+                        await self._ws_connection.send_bytes(msg)
+                    else:
+                        data = json.loads(msg)
+                        if data.get("type") == "done" or data.get("error"):
+                            break
 
-                    async for msg in silk_ws:
-                        if isinstance(msg, bytes):
-                            await self._ws_connection.send_bytes(msg)
-                        else:
-                            data = json.loads(msg)
-                            if data.get("type") == "done" or data.get("error"):
-                                break
-
-                await self._ws_connection.send_text(json.dumps({"type": "silk_end"}))
-
-            asyncio.run(_stream())
+            await self._ws_connection.send_text(json.dumps({"type": "silk_end"}))
 
         else:
-            with httpx.Client(
+            async with httpx.AsyncClient(
                 timeout=httpx.Timeout(connect=2.0, read=15.0, write=5.0, pool=5.0)
             ) as client:
                 try:
-                    resp = client.post(
+                    resp = await client.post(
                         f"{self.config.api_url}/v1/tts",
                         headers=headers,
                         json={
@@ -305,10 +302,8 @@ class SilkTTSBackend(TTSBackend):
                     )
                     return
 
-                asyncio.run(self._ws_connection.send_bytes(resp.content))
-                asyncio.run(
-                    self._ws_connection.send_text(json.dumps({"type": "silk_end"}))
-                )
+                await self._ws_connection.send_bytes(resp.content)
+                await self._ws_connection.send_text(json.dumps({"type": "silk_end"}))
 
     def is_available(self) -> bool:
         return bool(self.config.api_url and self.config.api_key)
@@ -318,9 +313,12 @@ class SilkTTSBackend(TTSBackend):
 
 
 class Pyttsx3TTSBackend(TTSBackend):
-    def speak(self, text: str, tone: str = "neutral") -> None:
+    async def speak(self, text: str, tone: str = "neutral") -> None:
         _validate_tone(tone)
-        # pyttsx3 does not support tone modulation
+        # pyttsx3 does not support tone modulation, run in separate thread
+        await asyncio.to_thread(self._speak_sync, text)
+
+    def _speak_sync(self, text: str) -> None:
         try:
             engine = pyttsx3.init()
             engine.setProperty("rate", 160)
@@ -342,7 +340,7 @@ class Pyttsx3TTSBackend(TTSBackend):
 
 
 class BrowserTTSBackend(TTSBackend):
-    def speak(self, text: str, tone: str = "neutral") -> None:
+    async def speak(self, text: str, tone: str = "neutral") -> None:
         _validate_tone(tone)
         return
 
@@ -366,8 +364,8 @@ def get_tts_backend(config: Config) -> TTSBackend:
     return BrowserTTSBackend()
 
 
-def speak_pyttsx3(text: str) -> None:
-    Pyttsx3TTSBackend().speak(text, tone="neutral")
+async def speak_pyttsx3(text: str) -> None:
+    await Pyttsx3TTSBackend().speak(text, tone="neutral")
 
 
 def tts_stub_available() -> bool:
