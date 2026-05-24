@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from pathlib import Path
 
 from google import genai
 from google.genai import types as genai_types
@@ -10,56 +11,150 @@ from inferr.config import Config
 from inferr.models import QueryRequest
 
 
+# Keywords indicating high-signal terminal lines that should be prioritized
+_HIGH_SIGNAL_PATTERNS = (
+    "traceback",
+    "error",
+    "exception",
+    "failed",
+    "warning",
+    "panic",
+    "conflict",
+    " 4",   # catches 4xx status codes
+    " 5",   # catches 5xx status codes
+    "uvicorn",
+    "assert",
+    "syntaxerror",
+    "typeerror",
+    "valueerror",
+    "keyerror",
+    "importerror",
+    "attributeerror",
+    "runtimeerror",
+    "oserror",
+)
+
+
+def _is_high_signal(line: str) -> bool:
+    lower = line.lower()
+    return any(kw in lower for kw in _HIGH_SIGNAL_PATTERNS)
+
+
+def _rank_terminal_lines(lines: list[str], limit: int) -> list[str]:
+    """Return up to `limit` lines, prioritising high-signal diagnostics."""
+    high = [l for l in lines if l.strip() and _is_high_signal(l)]
+    low = [l for l in lines if l.strip() and not _is_high_signal(l)]
+    # High-signal lines first, most recent last, capped at limit
+    combined = high[-limit:] + low[-(max(0, limit - len(high[-limit:]))):]  # noqa: E501
+    # Preserve approximate temporal order within each bucket, re-merge
+    merged = sorted(
+        set(combined),
+        key=lambda l: (0 if _is_high_signal(l) else 1, lines.index(l) if l in lines else 0)
+    )
+    return merged[:limit]
+
+
 def build_system_prompt(language: str, tone: str = "neutral") -> str:
+    # Operational constraints apply regardless of tone/language.
+    # The assistant is a sharp, silent senior engineer — not a chatbot.
+    operational_rules = (
+        "Rules (non-negotiable):\n"
+        "- Do not roleplay. Do not greet. Do not introduce yourself.\n"
+        "- Do not brainstorm unless the developer explicitly asks.\n"
+        "- Do not speculate beyond the observed runtime context.\n"
+        "- Do not give educational explanations unless explicitly requested.\n"
+        "- Do not use performative enthusiasm, filler phrases, or padding.\n"
+        "- If evidence is weak or context is insufficient, say so in one short sentence.\n"
+        "- Prioritize debugging and unblocking the developer's current coding task.\n"
+        "- Answer in 2–4 short sentences. Diagnosis first. Concrete next step second.\n"
+        "- Complete your response fully. Do not stop mid-sentence.\n"
+        "- Prefer one complete concise thought over multiple fragmented ones.\n"
+        "- Ground every answer in the observed terminal output, file, and error context.\n"
+        "- If no relevant context is observed, answer directly from the question only."
+    )
+
     if language == "hinglish":
-        base_prompt = (
-            "You are a senior developer pair programming partner. Respond in hinglish "
-            "(Hindi-English code-switching). Use developer-native phrasing like bhai, "
-            "dekh, chal, and yaar. For routine questions, answer in 3-4 sentences; "
-            "for complex errors, use 5-6 sentences. Be direct and specific about errors. "
-            "Always use the injected context (terminal buffer, shell history, active file, "
-            "flagged errors) and prioritize flagged errors when present. If you need to list "
-            "items, convert bullets into spoken form (e.g., 'teen cheezein hain...'). "
-            "Write all responses in Latin script only. Never use Devanagari or any other "
-            "non-Latin script. All Hindi words must be romanised: yaar not यार, "
-            "nahi not नहीं, karo not करो, bhai not भाई."
+        style = (
+            "Style: natural technical Hinglish. "
+            "Code-switch naturally — do not force Hindi or slang. "
+            "If an answer works better in plain English, use plain English. "
+            "Never use Devanagari or non-Latin script. Romanise Hindi words."
         )
     else:
-        base_prompt = (
-            "You are a senior developer pair programming partner. Respond in plain English. "
-            "For routine questions, answer in 3-4 sentences; for complex errors, use 5-6 sentences. "
-            "Be direct and specific about errors. Always use the injected context (terminal buffer, "
-            "shell history, active file, flagged errors) and prioritize flagged errors when present. "
-            "If you need to list items, convert bullets into spoken form (e.g., 'three things...'). "
-            "Write all responses in Latin script only. Never use Devanagari or any other "
-            "non-Latin script. Any Hindi words must be romanised: nahi not नहीं, "
-            "karo not करो."
-        )
+        style = "Style: plain, direct English. No filler."
 
-    tone_instructions = {
-        "urgent": (
-            "Errors are flagged. Lead with the error directly. Be specific about "
-            "line numbers and fix steps. Tone: direct, slightly urgent, no preamble."
-        ),
-        "warm": (
-            "This is the developer's first query this session. Be welcoming. "
-            "One sentence of orientation before the answer."
-        ),
-        "neutral": "Routine query. Be direct and concise.",
-    }
-    selected_tone = tone_instructions.get(tone, tone_instructions["neutral"])
-    tone_context = (
-        f"Current tone context: {tone}. Calibrate your response energy accordingly."
+    urgency_note = ""
+    if tone == "urgent":
+        urgency_note = "\nContext: errors are flagged. Lead with the specific error and line if visible."
+
+    return f"{operational_rules}\n\n{style}{urgency_note}"
+
+
+def _shorten_line(value: str, max_len: int = 120) -> str:
+    text = value.strip()
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "..."
+
+
+def _summarize_context(request: QueryRequest) -> str:
+    context = request.context
+
+    # Rank terminal lines: high-signal diagnostics first, then recency
+    terminal_events = [
+        _shorten_line(line)
+        for line in _rank_terminal_lines(context.terminal_buffer, limit=8)
+    ]
+    shell_commands = [
+        _shorten_line(line) for line in context.shell_history if line.strip()
+    ][-4:]
+    active_file = (
+        Path(context.active_file.path).name
+        if context.active_file is not None
+        else None
     )
-    return f"{base_prompt}\n\n{selected_tone}\n\n{tone_context}"
+
+    real_errors = [e for e in context.flagged_errors if e.type != "marker"]
+    error_summaries = [_shorten_line(e.summary) for e in real_errors[:3]]
+
+    repeated_error_note = ""
+    if error_summaries:
+        all_terminal = "\n".join(context.terminal_buffer).lower()
+        first_error = error_summaries[0].lower()
+        if first_error and all_terminal.count(first_error) >= 2:
+            repeated_error_note = "Note: same error appears repeatedly."
+
+    sections: list[str] = []
+
+    if error_summaries:
+        sections.append("Flagged errors:")
+        sections.extend([f"- {line}" for line in error_summaries])
+        if repeated_error_note:
+            sections.append(f"- {repeated_error_note}")
+        sections.append("")
+
+    sections.append("Terminal (high-signal first):")
+    if terminal_events:
+        sections.extend([f"- {line}" for line in terminal_events])
+    else:
+        sections.append("- none")
+
+    if shell_commands:
+        sections.append("\nRecent commands:")
+        sections.extend([f"- {line}" for line in shell_commands])
+
+    if active_file:
+        sections.append(f"\nActive file: {active_file}")
+
+    sections.append(f'\nUser said: "{request.transcript}"')
+    return "\n".join(sections)
 
 
 async def query_llm(
     request: QueryRequest, config: Config, tone: str = "neutral"
 ) -> str:
     system_prompt = build_system_prompt(config.language, tone=tone)
-    context_json = request.context.model_dump_json()
-    user_content = f"<context>\n{context_json}\n</context>\n\n{request.transcript}"
+    user_content = _summarize_context(request)
 
     history: list[genai_types.Content] = []
     for turn in request.context.conversation_history[-3:]:
@@ -74,14 +169,14 @@ async def query_llm(
     history.append(
         genai_types.Content(
             role="user",
-            parts=[genai_types.Part(text=user_content)],
+            parts=[genai_types.Part(text=f"<context>\n{user_content}\n</context>")],
         )
     )
 
     generate_config = genai_types.GenerateContentConfig(
         system_instruction=system_prompt,
-        max_output_tokens=512,
-        temperature=0.7,
+        max_output_tokens=220,
+        temperature=0.2,
     )
 
     keys_to_try = (

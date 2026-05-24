@@ -41,9 +41,9 @@ def test_bullet_conversion_english() -> None:
     assert "Two things" in result
 
 
-def test_truncation_at_400() -> None:
-    result = _preprocess_tts_text("a" * 500, tone="neutral")
-    assert len(result) <= 410
+def test_truncation_at_800() -> None:
+    result = _preprocess_tts_text("a" * 900, tone="neutral")
+    assert len(result) <= 810
 
 
 def test_no_devanagari_in_output() -> None:

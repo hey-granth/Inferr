@@ -18,7 +18,6 @@ from inferr.models import (
 def test_build_system_prompt_hinglish() -> None:
     prompt = build_system_prompt("hinglish")
     assert "hinglish" in prompt.lower()
-    assert "bhai" in prompt.lower()
 
 
 def test_build_system_prompt_english() -> None:

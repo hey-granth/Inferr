@@ -145,7 +145,7 @@ def test_resolve_tone_urgent_with_errors() -> None:
     assert server_module.resolve_tone(context) == "urgent"
 
 
-def test_resolve_tone_warm_on_first_query() -> None:
+def test_resolve_tone_neutral_on_first_query() -> None:
     context = ContextObject(
         terminal_buffer=[],
         shell_history=[],
@@ -156,7 +156,7 @@ def test_resolve_tone_warm_on_first_query() -> None:
         timestamp=datetime.now(timezone.utc),
     )
 
-    assert server_module.resolve_tone(context) == "warm"
+    assert server_module.resolve_tone(context) == "neutral"
 
 
 def test_resolve_tone_neutral_otherwise() -> None:

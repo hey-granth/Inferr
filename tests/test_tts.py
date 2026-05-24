@@ -87,10 +87,10 @@ def test_preprocess_bullet_to_spoken_english() -> None:
     assert output.startswith("Two things: ")
 
 
-def test_preprocess_truncates_at_400() -> None:
-    output = _preprocess_tts_text("a" * 500, tone="neutral")
+def test_preprocess_truncates_at_800() -> None:
+    output = _preprocess_tts_text("a" * 900, tone="neutral")
 
-    assert len(output) <= 410
+    assert len(output) <= 810
 
 
 def test_preprocess_tts_text_is_module_level() -> None:
@@ -219,7 +219,8 @@ async def test_silk_backend_stream_flow() -> None:
             assert mock_ws.send_bytes.call_count == 2
             mock_ws.send_bytes.assert_any_call(b"chunk1")
             mock_ws.send_bytes.assert_any_call(b"chunk2")
-            mock_ws.send_text.assert_called_once_with(json.dumps({"type": "silk_end"}))
+            assert mock_ws.send_text.call_count == 2
+            mock_ws.send_text.assert_any_call(json.dumps({"type": "silk_end"}))
 
 
 @pytest.mark.asyncio
@@ -246,7 +247,8 @@ async def test_silk_backend_non_stream_flow() -> None:
 
         mock_post.assert_called_once()
         mock_ws.send_bytes.assert_called_once_with(b"full_audio_bytes")
-        mock_ws.send_text.assert_called_once_with(json.dumps({"type": "silk_end"}))
+        assert mock_ws.send_text.call_count == 2
+        mock_ws.send_text.assert_any_call(json.dumps({"type": "silk_end"}))
 
 
 @pytest.mark.asyncio

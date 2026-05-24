@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import json
-from typing import Any, SupportsIndex, cast
+from typing import Any, SupportsIndex
 import re
 import sys
 
@@ -13,6 +13,7 @@ from inferr.config import Config
 from inferr.models import SilkConfig
 
 _VALID_TONES = {"neutral", "urgent", "warm"}
+_TTS_TRUNCATE_LIMIT = 800
 _HINGLISH_HINTS = {
     "bhai",
     "yaar",
@@ -25,7 +26,6 @@ _HINGLISH_HINTS = {
     "pe",
     "se",
 }
-
 
 class _PreparedTTSText(str):
     __slots__ = ("_plain",)
@@ -147,8 +147,8 @@ def _preprocess_tts_text(text: str, tone: str = "neutral") -> str:
 
     output = re.sub(r"\s+", " ", output).strip()
     marker = tone_markers.get(tone, "[neutral]")
-    if len(output) > 400:
-        plain_output = output[:400] + "..."
+    if len(output) > _TTS_TRUNCATE_LIMIT:
+        plain_output = output[:_TTS_TRUNCATE_LIMIT] + "..."
         if tone == "warm":
             return _PreparedTTSText(
                 f"[happy] <chuckle> {plain_output}",
@@ -251,25 +251,46 @@ class SilkTTSBackend(TTSBackend):
 
             import websockets
 
+            chunk_count = 0
+            total_bytes = 0
+            start_time = asyncio.get_running_loop().time()
             async with websockets.connect(f"{ws_url}?token={token}") as silk_ws:
-                await silk_ws.send(
-                    json.dumps(
-                        {
-                            "text": text,
-                            "temperature": 0.7,
-                        }
+                try:
+                    await silk_ws.send(
+                        json.dumps(
+                            {
+                                "text": text,
+                                "temperature": 0.7,
+                            }
+                        )
                     )
-                )
 
-                async for msg in silk_ws:
-                    if isinstance(msg, bytes):
-                        await self._ws_connection.send_bytes(msg)
-                    else:
-                        data = json.loads(msg)
-                        if data.get("type") == "done" or data.get("error"):
-                            break
-
-            await self._ws_connection.send_text(json.dumps({"type": "silk_end"}))
+                    async for msg in silk_ws:
+                        if isinstance(msg, bytes):
+                            chunk_count += 1
+                            total_bytes += len(msg)
+                            await self._ws_connection.send_bytes(msg)
+                        else:
+                            data = json.loads(msg)
+                            if data.get("type") == "done" or data.get("error"):
+                                break
+                finally:
+                    elapsed_ms = int((asyncio.get_running_loop().time() - start_time) * 1000)
+                    await self._ws_connection.send_text(
+                        json.dumps(
+                            {
+                                "type": "diagnostic",
+                                "stage": "silk_stream",
+                                "chunk_count": chunk_count,
+                                "total_bytes": total_bytes,
+                                "elapsed_ms": elapsed_ms,
+                            }
+                        )
+                    )
+                    # Always emit completion marker so browser finalizes playback reliably.
+                    await self._ws_connection.send_text(
+                        json.dumps({"type": "silk_end"})
+                    )
 
         else:
             async with httpx.AsyncClient(
@@ -303,6 +324,16 @@ class SilkTTSBackend(TTSBackend):
                     return
 
                 await self._ws_connection.send_bytes(resp.content)
+                await self._ws_connection.send_text(
+                    json.dumps(
+                        {
+                            "type": "diagnostic",
+                            "stage": "silk_full",
+                            "chunk_count": 1,
+                            "total_bytes": len(resp.content),
+                        }
+                    )
+                )
                 await self._ws_connection.send_text(json.dumps({"type": "silk_end"}))
 
     def is_available(self) -> bool:

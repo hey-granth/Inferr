@@ -49,8 +49,7 @@ body::before {
 #app {
     display: flex;
     height: 100vh;
-    opacity: 0;
-    animation: appFadeIn 0.4s ease 0.1s forwards;
+    opacity: 1;
 }
 
 @keyframes appFadeIn {
@@ -74,8 +73,7 @@ body::before {
     display: flex;
     align-items: baseline;
     gap: 8px;
-    opacity: 0;
-    animation: fadeUp 0.3s ease 0.15s forwards;
+    opacity: 1;
 }
 
 #brand-name {
@@ -96,8 +94,7 @@ body::before {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    opacity: 0;
-    animation: fadeUp 0.3s ease 0.23s forwards;
+    opacity: 1;
 }
 
 #ws-indicator, #tts-indicator {
@@ -132,8 +129,7 @@ body::before {
     height: 60%;
     min-height: 160px;
     display: block;
-    opacity: 0;
-    animation: fadeUp 0.3s ease 0.31s forwards;
+    opacity: 1;
     /* canvas draws itself */
 }
 
@@ -141,8 +137,7 @@ body::before {
 #mic-zone {
     display: flex;
     justify-content: center;
-    opacity: 0;
-    animation: fadeUp 0.3s ease 0.39s forwards;
+    opacity: 1;
 }
 
 #mic-btn {
@@ -182,7 +177,7 @@ body::before {
 #mic-btn.listening::after {
     background: var(--amber-dim);
     opacity: 1;
-    animation: micPulse 1.2s ease infinite;
+    animation: none;
 }
 
 @keyframes micPulse {
@@ -211,7 +206,7 @@ body::before {
     font-size: 11px;
     letter-spacing: 1.5px;
     color: var(--amber);
-    animation: errorPulse 2s ease infinite;
+    animation: none;
 }
 
 #error-badge-icon {
@@ -230,8 +225,7 @@ body::before {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    opacity: 0;
-    animation: fadeUp 0.3s ease 0.47s forwards;
+    opacity: 1;
 }
 
 .stat-row {
@@ -271,8 +265,7 @@ body::before {
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    opacity: 0;
-    animation: fadeUp 0.3s ease 0.2s forwards;
+    opacity: 1;
 }
 
 /* ── Conversation ───────────────────────────────────────────────── */

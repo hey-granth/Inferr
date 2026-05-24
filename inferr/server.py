@@ -8,8 +8,8 @@ import logging
 import os
 from pathlib import Path
 import subprocess
-import threading
 import uuid
+import json
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -39,6 +39,14 @@ last_activity: datetime | None = None
 
 _shell_command_buffer: list[str] = []
 _SHELL_BUFFER_MAX = 200
+
+_TTS_MIN_TIMEOUT = 12.0
+_TTS_MAX_TIMEOUT = 45.0
+
+def _tts_timeout_seconds(text: str) -> float:
+    # Estimate: ~18 chars/sec, plus base buffer for startup latency.
+    est = 8.0 + (max(len(text), 1) / 18.0)
+    return max(_TTS_MIN_TIMEOUT, min(_TTS_MAX_TIMEOUT, est))
 
 
 def get_shell_command_buffer() -> list[str]:
@@ -167,14 +175,11 @@ async def browser_config() -> dict[str, object]:
 
 def resolve_tone(context: ContextObject) -> str:
     """
-    Returns 'urgent' if any flagged errors are present.
-    Returns 'warm' if conversation_history is empty (first query of the session).
+    Returns 'urgent' if real (non-marker) errors are flagged.
     Returns 'neutral' otherwise.
     """
     if any(error.type != "marker" for error in context.flagged_errors):
         return "urgent"
-    if not context.conversation_history:
-        return "warm"
     return "neutral"
 
 
@@ -288,6 +293,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 tone = resolve_tone(context)
                 request = QueryRequest(transcript=message.payload, context=context)
                 response_text = await query_llm(request, get_config(), tone=tone)
+                response_len = len(response_text)
 
                 conversation_history.append(
                     ConversationTurn(role="user", content=message.payload)
@@ -320,23 +326,77 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     ),
                 }
 
+                response_payload = {
+                    "type": "response",
+                    "text": response_text,
+                    "has_errors": has_errors,
+                    "tone": tone,
+                    "tts_backend": backend_name,
+                    "context_stats": context_stats,
+                }
+                await websocket.send_json(response_payload)
+
+                try:
+                    payload_bytes = len(json.dumps(response_payload).encode("utf-8"))
+                except (TypeError, ValueError):
+                    payload_bytes = 0
                 await websocket.send_json(
                     {
-                        "type": "response",
-                        "text": response_text,
-                        "has_errors": has_errors,
-                        "tone": tone,
+                        "type": "diagnostic",
+                        "stage": "llm_response",
+                        "response_len": response_len,
+                        "payload_bytes": payload_bytes,
                         "tts_backend": backend_name,
-                        "context_stats": context_stats,
                     }
+                )
+
+                logger.info(
+                    "LLM response len=%s payload_bytes=%s backend=%s",
+                    response_len,
+                    payload_bytes,
+                    backend_name,
                 )
 
                 if tts_backend is not None:
                     try:
-                        await tts_backend.speak(response_text, tone=tone)
+                        tts_timeout = _tts_timeout_seconds(response_text)
+                        await websocket.send_json(
+                            {
+                                "type": "diagnostic",
+                                "stage": "tts_start",
+                                "timeout_s": tts_timeout,
+                                "response_len": response_len,
+                            }
+                        )
+                        tts_start = asyncio.get_running_loop().time()
+                        await asyncio.wait_for(
+                            tts_backend.speak(response_text, tone=tone),
+                            timeout=tts_timeout,
+                        )
+                        tts_elapsed = int(
+                            (asyncio.get_running_loop().time() - tts_start) * 1000
+                        )
+                        await websocket.send_json(
+                            {
+                                "type": "diagnostic",
+                                "stage": "tts_end",
+                                "elapsed_ms": tts_elapsed,
+                                "response_len": response_len,
+                            }
+                        )
                     except NotImplementedError as exc:
                         logger.info(
                             "%s backend not active yet: %s", tts_backend.name(), exc
+                        )
+                    except TimeoutError:
+                        logger.warning("%s TTS timed out", tts_backend.name())
+                        await websocket.send_json(
+                            {
+                                "type": "diagnostic",
+                                "stage": "tts_timeout",
+                                "timeout_s": tts_timeout,
+                                "response_len": response_len,
+                            }
                         )
                     except Exception as exc:
                         logger.exception("%s TTS failed: %s", tts_backend.name(), exc)
