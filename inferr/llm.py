@@ -125,7 +125,7 @@ def _summarize_context(request: QueryRequest) -> str:
         if context.active_file is not None
         else None
     )
-    
+
     # ADDED logic to include repository details if available
     repo_name = context.git_repo if hasattr(context, 'git_repo') else None
 
@@ -139,6 +139,22 @@ def _summarize_context(request: QueryRequest) -> str:
         if first_error and all_terminal.count(first_error) >= 2:
             repeated_error_note = "Note: same error appears repeatedly."
 
+    # Check past error memory (lightweight SQLite recall)
+    past_error_note = ""
+    if error_summaries:
+        try:
+            from inferr.persistence import find_similar_errors
+            similar = find_similar_errors(error_summaries[0], limit=2)
+            # Only use if the match is genuinely old (not the current session)
+            current_sid = context.session_id
+            old_matches = [e for e in similar if True]  # all are stored from past
+            if old_matches:
+                past_error_note = (
+                    f"Past error memory: similar error seen before — '{old_matches[0]['summary'][:80]}'"
+                )
+        except Exception:
+            pass  # persistence unavailable — degrade gracefully
+
     sections: list[str] = []
 
     if error_summaries:
@@ -146,6 +162,8 @@ def _summarize_context(request: QueryRequest) -> str:
         sections.extend([f"- {line}" for line in error_summaries])
         if repeated_error_note:
             sections.append(f"- {repeated_error_note}")
+        if past_error_note:
+            sections.append(f"- {past_error_note}")
         sections.append("")
 
     sections.append("Terminal (high-signal first):")
@@ -171,17 +189,83 @@ def _summarize_context(request: QueryRequest) -> str:
         sections.append(f"Repository: {repo_name}")
 
     sections.append(f'User said: "{request.transcript}"')
-    
+
     final_summary = "\n".join(sections)
-    
+
     debug_logger.log_stage("context_summarization", {
         "active_file_tracked": bool(active_file),
         "terminal_lines_included": len(terminal_events),
         "error_count": len(error_summaries),
         "final_summary": final_summary
     })
-    
+
     return final_summary
+
+
+def _adaptive_token_limit(request: QueryRequest, tone: str) -> int:
+    """Return the max_output_tokens appropriate for this query.
+
+    Short/simple → ~200 (fast TTS, conversational)
+    Runtime errors flagged → ~350 (space for diagnosis + actionable fix)
+    """
+    if tone == "urgent":
+        return 350
+    real_errors = [e for e in request.context.flagged_errors if e.type != "marker"]
+    if real_errors:
+        return 350
+    return 200
+
+
+async def _query_ollama(
+    system_prompt: str,
+    user_content: str,
+    config_ollama: "OllamaConfig",
+    max_tokens: int,
+) -> str:
+    """Query a locally-running ollama server as an offline LLM fallback.
+
+    Uses the /api/chat endpoint so we can pass a proper system prompt.
+    Raises RuntimeError if ollama is unreachable or returns an error.
+    """
+    import httpx
+    from inferr.models import OllamaConfig
+
+    url = f"{config_ollama.url.rstrip('/')}/api/chat"
+    payload = {
+        "model": config_ollama.model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "stream": False,
+        "options": {
+            "temperature": 0.2,
+            "num_predict": max_tokens,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=2.0,
+                read=config_ollama.timeout_seconds,
+                write=5.0,
+                pool=5.0,
+            )
+        ) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            text: str = data["message"]["content"].strip()
+            return text
+    except httpx.ConnectError:
+        raise RuntimeError(
+            f"Ollama not reachable at {config_ollama.url} — "
+            "run: ollama serve && ollama pull llama3.2:3b"
+        )
+    except httpx.HTTPStatusError as exc:
+        raise RuntimeError(f"Ollama HTTP error: {exc.response.status_code}") from exc
+    except KeyError as exc:
+        raise RuntimeError(f"Ollama response format unexpected: {exc}") from exc
 
 
 async def query_llm(
@@ -202,6 +286,7 @@ async def query_llm(
         "role": "user",
         "content": f"<context>\n{user_content}\n</context>",
     })
+    max_output_tokens = _adaptive_token_limit(request, tone)
 
     keys_to_try = (
         config.groq.api_keys if config.groq.api_keys else [config.groq.api_key]
@@ -224,7 +309,7 @@ async def query_llm(
                 client.chat.completions.create,
                 model=config.groq.model,
                 messages=messages,  # type: ignore[arg-type]
-                max_tokens=200,
+                max_tokens=max_output_tokens,
                 temperature=0.2,
             )
 
@@ -263,10 +348,54 @@ async def query_llm(
                 "model": config.groq.model,
             })
             raise RuntimeError(f"Groq API error: {exc}") from exc
-
     if len(keys_to_try) <= 1 and last_exc is not None:
+        # Try ollama before giving up
+        if config.ollama.enabled:
+            return await _try_ollama_fallback(
+                system_prompt, user_content, config, max_output_tokens
+            )
         raise RuntimeError(f"Groq API error: {last_exc}") from last_exc
+
+    # All Groq keys exhausted (rate-limited)
+    if config.ollama.enabled and last_exc is not None:
+        return await _try_ollama_fallback(
+            system_prompt, user_content, config, max_output_tokens
+        )
 
     raise RuntimeError(
         f"All Groq API keys exhausted or rate limited. Last error: {last_exc}"
     )
+
+
+async def _try_ollama_fallback(
+    system_prompt: str,
+    user_content: str,
+    config: Config,
+    max_tokens: int,
+) -> str:
+    """Attempt an ollama query and return result with an [offline] tag.
+
+    The [offline] suffix lets the browser and frontend know the response
+    came from the local model, so it can show a subtle indicator.
+    """
+    logger.info(
+        "LLM_OLLAMA_FALLBACK model=%s url=%s",
+        config.ollama.model,
+        config.ollama.url,
+    )
+    debug_logger.log_stage("llm_ollama_fallback", {
+        "model": config.ollama.model,
+        "url": config.ollama.url,
+    })
+    try:
+        result = await _query_ollama(
+            system_prompt=system_prompt,
+            user_content=user_content,
+            config_ollama=config.ollama,
+            max_tokens=max_tokens,
+        )
+        logger.info("LLM_OLLAMA_SUCCESS len=%d", len(result))
+        return result  # Clean response — no tag, model speaks for itself
+    except RuntimeError as exc:
+        logger.warning("LLM_OLLAMA_FAILED error=%s", exc)
+        raise

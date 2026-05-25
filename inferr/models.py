@@ -60,6 +60,25 @@ class DeepgramConfig(BaseModel):
     language: str = "en-IN"
 
 
+class OllamaConfig(BaseModel):
+    """Offline LLM fallback via local ollama server."""
+
+    enabled: bool = True  # Attempt ollama when Gemini fails
+    model: str = "llama3.2:3b"
+    url: str = "http://localhost:11434"
+    timeout_seconds: float = 20.0
+
+
+class WakeWordConfig(BaseModel):
+    """openwakeword-based always-on wake phrase detector."""
+
+    enabled: bool = False  # Opt-in (requires mic on server + openwakeword)
+    model_name: str = "alexa"  # Pre-trained model; swap for custom .onnx path
+    model_path: str = ""  # Full path to custom .onnx; overrides model_name
+    threshold: float = 0.5
+    cooldown_seconds: float = 3.0
+
+
 class QueryRequest(BaseModel):
     transcript: str
     context: ContextObject
@@ -71,8 +90,8 @@ class QueryResponse(BaseModel):
 
 
 class WebSocketMessage(BaseModel):
-    type: Literal["transcript", "ping"]
-    payload: str
+    type: Literal["transcript", "ping", "wake_word"]
+    payload: str = ""
 
 
 class ShellCommandCapture(BaseModel):

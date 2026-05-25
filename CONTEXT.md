@@ -2,10 +2,10 @@
 
 A software project composed of the following subsystems:
 
-- **inferr/**: Primary subsystem containing 15 files
-- **tests/**: Primary subsystem containing 7 files
+- **inferr/**: Primary subsystem containing 18 files
+- **tests/**: Primary subsystem containing 12 files
 - **browser/**: Primary subsystem containing 3 files
-- **typings/**: Primary subsystem containing 2 files
+- **extensions/**: Primary subsystem containing 3 files
 - **Root**: Contains scripts and execution points
 
 ## ENTRY_POINTS
@@ -239,6 +239,8 @@ def install_shell(shell_name: Optional[str]) -> None:
 - class `SilkConfig`
 - class `GeminiConfig`
 - class `DeepgramConfig`
+- class `OllamaConfig`
+- class `WakeWordConfig`
 - class `QueryRequest`
 - class `QueryResponse`
 - class `WebSocketMessage`
@@ -254,17 +256,6 @@ def install_shell(shell_name: Optional[str]) -> None:
 - `_coerce_bool()`
 - `_ensure_config_file()`
 - `load_config()`
-
-**`inferr/cli.py`**
-- `cli()`
-- `_resolve_port()`
-- `_resolve_host()`
-- `_start_session_when_ready()`
-- `start()`
-- `stop()`
-- `status()`
-- `logs()`
-- `install_shell()`
 
 **`inferr/tts.py`**
 - `tts_timeout_seconds()`
@@ -306,15 +297,31 @@ def install_shell(shell_name: Optional[str]) -> None:
 - `_is_high_signal()`
 - `_rank_terminal_lines()`
 - `build_system_prompt()`
+- `_sanitize_context_line()`
 - `_shorten_line()`
 - `_summarize_context()`
+- `_adaptive_token_limit()`
+- `_query_ollama()`
 - `query_llm()`
+- `_try_ollama_fallback()`
+
+**`inferr/cli.py`**
+- `cli()`
+- `_resolve_port()`
+- `_resolve_host()`
+- `_start_session_when_ready()`
+- `start()`
+- `stop()`
+- `status()`
+- `logs()`
+- `install_shell()`
 
 **`inferr/server.py`**
 - `get_shell_command_buffer()`
 - `_apply_env_overrides()`
 - `get_config()`
 - `lifespan()`
+- `favicon()`
 - `unhandled_exception_handler()`
 - `start_session()`
 - `stop_session()`
@@ -322,19 +329,22 @@ def install_shell(shell_name: Optional[str]) -> None:
 - `health()`
 - `browser_config()`
 - `resolve_tone()`
+- `_on_wake_word_detected()`
+- `_broadcast_wake_word()`
 - `speech_to_text_endpoint()`
+- `_handle_local_stt()`
+- `_handle_deepgram_stt()`
 - `websocket_endpoint()`
+- class `ShellOutputCapture`
 - `capture_command()`
+- `capture_output()`
+- class `ActiveFilePayload`
+- `push_active_file()`
+- `get_active_file_context()`
 - `query_endpoint()`
 
-**`inferr/context/errors.py`**
-- `_first_meaningful()`
-- `_last_meaningful()`
-- `_should_emit()`
-- `_make_error()`
-- `extract_errors()`
-
 **`inferr/context/terminal.py`**
+- `sanitize_terminal_line()`
 - class `TerminalCapture`
   - `__init__()`
   - `_reader()`
@@ -343,6 +353,41 @@ def install_shell(shell_name: Optional[str]) -> None:
   - `inject_line()`
   - `write()`
   - `stop()`
+
+**`inferr/context/__init__.py`**
+- class `ContextAssembler`
+  - `__init__()`
+  - `start()`
+  - `stop()`
+  - `inject_command()`
+  - `hint_active_file_from_command()`
+  - `push_active_file()`
+  - `assemble()`
+
+**`inferr/context/files.py`**
+- `_normalize_event_path()`
+- class `_FileEventHandler`
+  - `__init__()`
+  - `on_modified()`
+  - `on_created()`
+- class `FileWatcher`
+  - `__init__()`
+  - `_resolve_path()`
+  - `hint_from_shell_command()`
+  - `_iter_source_files()`
+  - `seed_recent_files()`
+  - `process_path()`
+  - `get_active_file()`
+  - `push_active_file()`
+  - `start()`
+  - `stop()`
+
+**`inferr/context/errors.py`**
+- `_first_meaningful()`
+- `_last_meaningful()`
+- `_should_emit()`
+- `_make_error()`
+- `extract_errors()`
 
 **`browser/app.js`**
 - `drawOscilloscope()`
@@ -360,13 +405,23 @@ def install_shell(shell_name: Optional[str]) -> None:
 - `handleTextMessage()`
 - `connectWebSocket()`
 - `sendTranscript()`
+- `float32ToPcm16()`
+- `downsampleToSttRate()`
+- `handleDeepgramMessage()`
 - `startMic()`
 - `stopMic()`
+
+**`extensions/vscode/extension.js`**
+- `post()`
+- `mapLanguage()`
+- `pushActiveBuffer()`
+- `activate()`
+- `deactivate()`
 
 ## IMPORTANT_CALL_PATHS
 
 cli.cli()
-  → __init__()
+  → extension.post()
 ## CORE_MODULES
 
 ### `inferr/models.py`
@@ -399,6 +454,8 @@ cli.cli()
 - `def _get_table(data: Mapping[str, object]) -> dict[str, object]`
 - `def load_config() -> Config`
 
+**Notes:** large file (304 lines)
+
 ### `inferr/tts.py`
 
 **Purpose:** Implements tts.
@@ -416,74 +473,66 @@ cli.cli()
 - `def _strip_bullet_prefix(line: str) -> str`
 - `def _validate_tone(tone: str) -> None`
 
-## SUPPORTING_MODULES
-
 ### `inferr/llm.py`
 
-```python
-def _is_high_signal(line: str) -> bool
+**Purpose:** Implements llm.
+**Depends on:** `config`, `context.terminal`, `debug`, `models`, `persistence`
 
-def _rank_terminal_lines(lines: list[str], limit: int) -> list[str]
-    """Return up to `limit` lines, prioritising high-signal diagnostics."""
-
-def build_system_prompt(language: str, tone: str = "neutral") -> str
-
-def _shorten_line(value: str, max_len: int = 120) -> str
-
-def _summarize_context(request: QueryRequest) -> str
-
-def query_llm(
-    request: QueryRequest, config: Config, tone: str = "neutral"
-) -> str
-
-```
+**Functions:**
+- `def _adaptive_token_limit(request: QueryRequest, tone: str) -> int`
+- `def _is_high_signal(line: str) -> bool`
+- `def _query_ollama(system_prompt: str, user_content: str, config_ollama: "OllamaConfig", max_tokens: int) -> str`
+- `def _rank_terminal_lines(lines: list[str], limit: int) -> list[str]`
+- `def _sanitize_context_line(value: str) -> str`
+- `def _shorten_line(value: str, max_len: int = 120) -> str`
 
 ### `inferr/server.py`
 
+**Purpose:** Implements server.
+**Depends on:** `config`, `context`, `debug`, `llm`, `models`, +4 more
+
+**Types:**
+- `ActiveFilePayload` (bases: `BaseModel`)
+- `ShellOutputCapture` (bases: `BaseModel`)
+
+**Functions:**
+- `def _apply_env_overrides(config: Config) -> Config`
+- `def _broadcast_wake_word(phrase: str, score: float) -> None`
+- `def _handle_deepgram_stt(websocket: WebSocket, client_host: str) -> None`
+- `def _handle_local_stt(websocket: WebSocket, client_host: str) -> None`
+- `def _on_wake_word_detected(phrase: str, score: float) -> None`
+- `def browser_config() -> dict[str, object]`
+
+## Constants
+CONFIG_OVERRIDE: Config | None = None
+
+## SUPPORTING_MODULES
+
+### `inferr/context/terminal.py`
+
 ```python
-def get_shell_command_buffer() -> list[str]
-    """Return the current shell command buffer (public accessor for cross-module use)."""
+def sanitize_terminal_line(line: str) -> str
+    """Strip carriage returns and ANSI escapes so context text stays readable."""
 
-def _apply_env_overrides(config: Config) -> Config
+class TerminalCapture
 
-def get_config() -> Config
+```
 
-def lifespan(app: FastAPI)
-    """FastAPI lifespan manager."""
+### `inferr/context/__init__.py`
 
-def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse
-    """Return structured JSON for unexpected server errors."""
+```python
+class ContextAssembler
 
-def start_session() -> dict[str, str]
-    """Initialize a new Inferr session and context capture."""
+```
 
-def stop_session() -> dict[str, str]
-    """Stop the current Inferr session."""
+### `inferr/context/files.py`
 
-def get_context() -> JSONResponse
-    """Return the current context object."""
+```python
+def _normalize_event_path(value: str | bytes) -> Path | None
 
-def health() -> dict[str, object | None]
-    """Return server health status."""
+class _FileEventHandler(FileSystemEventHandler)
 
-def browser_config() -> dict[str, object]
-    """Return config the browser needs at runtime. Only non-secret values."""
-
-def resolve_tone(context: ContextObject) -> str
-    """Returns 'urgent' if real (non-marker) errors are flagged.
-    Returns 'neutral' otherwise."""
-
-def speech_to_text_endpoint(websocket: WebSocket) -> None
-    """Proxy browser microphone audio to Deepgram without exposing API keys."""
-
-def websocket_endpoint(websocket: WebSocket) -> None
-    """Handle WebSocket transcript streaming and LLM responses."""
-
-def capture_command(payload: ShellCommandCapture) -> dict[str, str]
-    """Receive shell commands from the shell integration plugin."""
-
-def query_endpoint(request: QueryRequest) -> QueryResponse
-    """HTTP fallback endpoint for transcript queries."""
+class FileWatcher
 
 ```
 
@@ -501,13 +550,6 @@ def _make_error(
 ) -> FlaggedError | None
 
 def extract_errors(lines: list[str]) -> list[FlaggedError]
-
-```
-
-### `inferr/context/terminal.py`
-
-```python
-class TerminalCapture
 
 ```
 
@@ -544,6 +586,12 @@ function connectWebSocket()
 
 function sendTranscript(text)
 
+function float32ToPcm16(float32Array)
+
+function downsampleToSttRate(input, inputRate, outputRate)
+
+function handleDeepgramMessage(data)
+
 async function startMic()
 
 function stopMic()
@@ -552,7 +600,22 @@ function stopMic()
 
 ### `browser/style.css`
 
-*426 lines, 0 imports*
+*440 lines, 0 imports*
+
+### `extensions/vscode/extension.js`
+
+```javascript
+function post(serverUrl, path, body)
+
+function mapLanguage(langId)
+
+function pushActiveBuffer()
+
+function activate(context)
+
+function deactivate()
+
+```
 
 ## DEPENDENCY_GRAPH
 
@@ -560,61 +623,66 @@ function stopMic()
 graph LR
     f0["inferr/models.py"]
     f1["inferr/config.py"]
-    f2["inferr/cli.py"]
-    f3["inferr/tts.py"]
-    f4["inferr/llm.py"]
+    f2["inferr/tts.py"]
+    f3["inferr/llm.py"]
+    f4["inferr/cli.py"]
     f5["inferr/server.py"]
-    f6["inferr/context/errors.py"]
-    f7["inferr/context/terminal.py"]
-    f8["browser/app.js"]
-    f9["browser/style.css"]
-    f10["pyproject.toml"]
-    f11["inferr/context/__init__.py"]
-    f12["inferr/__init__.py"]
-    f13["browser/index.html"]
-    f14["typings/ptyprocess.pyi"]
-    f15["requirements.txt"]
-    f16["inferr/context/files.py"]
-    f17["inferr/debug.py"]
-    f18["typings/pyttsx3.pyi"]
-    f19["inferr/context/history.py"]
-    f20["inferr/shell/inferr.bash"]
-    f21["inferr/shell/inferr.zsh"]
-    f22[".gitignore"]
+    f6["inferr/context/terminal.py"]
+    f7["inferr/context/__init__.py"]
+    f8["inferr/context/files.py"]
+    f9["pyproject.toml"]
+    f10["inferr/context/errors.py"]
+    f11["browser/app.js"]
+    f12["browser/style.css"]
+    f13["extensions/vscode/extension.js"]
+    f14["inferr/__init__.py"]
+    f15["browser/index.html"]
+    f16["inferr/persistence.py"]
+    f17["inferr/wakeword.py"]
+    f18["inferr/debug.py"]
+    f19["inferr/stt.py"]
+    f20["typings/ptyprocess.pyi"]
+    f21["requirements.txt"]
+    f22["inferr/context/history.py"]
+    f23["typings/pyttsx3.pyi"]
+    f24[".gitignore"]
     f1 --> f0
-    f2 --> f5
-    f2 --> f12
+    f2 --> f4
+    f2 --> f18
+    f2 --> f0
     f2 --> f1
-    f3 --> f2
-    f3 --> f17
+    f3 --> f16
+    f3 --> f18
     f3 --> f0
+    f3 --> f6
     f3 --> f1
-    f4 --> f17
-    f4 --> f0
+    f4 --> f13
+    f4 --> f5
+    f4 --> f14
     f4 --> f1
+    f5 --> f19
+    f5 --> f16
     f5 --> f17
-    f5 --> f3
+    f5 --> f18
+    f5 --> f2
     f5 --> f0
-    f5 --> f4
-    f5 --> f11
+    f5 --> f3
+    f5 --> f7
     f5 --> f1
-    f6 --> f2
-    f6 --> f0
-    f7 --> f2
-    f7 --> f14
-    f8 --> f2
-    f9 --> f2
-    f10 --> f2
-    f11 --> f5
-    f11 --> f7
-    f11 --> f19
-    f11 --> f16
-    f11 --> f6
-    f11 --> f0
-    f11 --> f1
-    f13 --> f2
-    f16 --> f0
-    f16 --> f1
+    f7 --> f5
+    f7 --> f6
+    f7 --> f22
+    f7 --> f8
+    f7 --> f10
+    f7 --> f0
+    f7 --> f1
+    f8 --> f0
+    f8 --> f1
+    f9 --> f4
+    f10 --> f0
+    f12 --> f4
+    f15 --> f4
+    f17 --> f4
 ```
 
 ### Cyclic Dependencies
@@ -628,61 +696,77 @@ graph LR
 
 | File | Score | Tier | Tokens |
 |------|-------|------|--------|
-| `inferr/models.py` | 0.808 | structured summary | 92 |
-| `inferr/config.py` | 0.792 | structured summary | 164 |
-| `inferr/cli.py` | 0.784 | full source | 1611 |
-| `inferr/tts.py` | 0.626 | structured summary | 197 |
-| `inferr/llm.py` | 0.552 | signatures | 139 |
-| `tests/test_llm.py` | 0.533 | one-liner | 21 |
-| `inferr/server.py` | 0.526 | signatures | 331 |
-| `tests/test_server.py` | 0.492 | one-liner | 20 |
-| `tests/test_context.py` | 0.492 | one-liner | 20 |
-| `tests/test_tts.py` | 0.476 | one-liner | 21 |
-| `inferr/context/errors.py` | 0.436 | signatures | 101 |
-| `inferr/context/terminal.py` | 0.409 | signatures | 18 |
-| `browser/app.js` | 0.378 | signatures | 112 |
-| `browser/style.css` | 0.378 | signatures | 14 |
-| `pyproject.toml` | 0.368 | one-liner | 12 |
-| `inferr/context/__init__.py` | 0.361 | one-liner | 23 |
-| `inferr/__init__.py` | 0.312 | one-liner | 18 |
-| `tests/test_tts_preprocessing.py` | 0.304 | one-liner | 23 |
-| `browser/index.html` | 0.303 | one-liner | 11 |
-| `tests/test_llm_prompt.py` | 0.296 | one-liner | 22 |
-| `typings/ptyprocess.pyi` | 0.295 | one-liner | 22 |
-| `tests/test_errors.py` | 0.292 | one-liner | 20 |
-| `requirements.txt` | 0.261 | one-liner | 10 |
-| `PROJECT_CONTEXT.md` | 0.253 | one-liner | 11 |
-| `README.md` | 0.252 | one-liner | 10 |
-| `inferr/context/files.py` | 0.248 | one-liner | 26 |
-| `inferr/debug.py` | 0.233 | one-liner | 20 |
-| `typings/pyttsx3.pyi` | 0.195 | one-liner | 23 |
-| `inferr/context/history.py` | 0.190 | one-liner | 21 |
-| `inferr/shell/inferr.bash` | 0.145 | one-liner | 17 |
-| `inferr/shell/inferr.zsh` | 0.145 | one-liner | 17 |
-| `.gitignore` | 0.115 | one-liner | 10 |
+| `inferr/models.py` | 0.755 | structured summary | 92 |
+| `inferr/config.py` | 0.662 | structured summary | 173 |
+| `inferr/tts.py` | 0.588 | structured summary | 197 |
+| `inferr/llm.py` | 0.579 | structured summary | 170 |
+| `inferr/cli.py` | 0.548 | full source | 1611 |
+| `inferr/server.py` | 0.488 | structured summary | 197 |
+| `tests/test_context.py` | 0.414 | one-liner | 20 |
+| `tests/test_tts.py` | 0.407 | one-liner | 21 |
+| `tests/test_llm.py` | 0.404 | one-liner | 21 |
+| `inferr/context/terminal.py` | 0.371 | signatures | 43 |
+| `tests/test_server.py` | 0.371 | one-liner | 20 |
+| `inferr/context/__init__.py` | 0.350 | signatures | 19 |
+| `inferr/context/files.py` | 0.343 | signatures | 41 |
+| `pyproject.toml` | 0.324 | one-liner | 12 |
+| `inferr/context/errors.py` | 0.316 | signatures | 101 |
+| `browser/app.js` | 0.274 | signatures | 145 |
+| `browser/style.css` | 0.271 | signatures | 14 |
+| `tests/test_tts_preprocessing.py` | 0.257 | one-liner | 23 |
+| `extensions/vscode/extension.js` | 0.230 | signatures | 42 |
+| `inferr/__init__.py` | 0.225 | one-liner | 18 |
+| `README.md` | 0.224 | one-liner | 10 |
+| `browser/index.html` | 0.218 | one-liner | 11 |
+| `inferr/persistence.py` | 0.213 | one-liner | 18 |
+| `inferr/wakeword.py` | 0.207 | one-liner | 24 |
+| `tests/test_llm_prompt.py` | 0.196 | one-liner | 22 |
+| `tests/test_errors.py` | 0.194 | one-liner | 20 |
+| `inferr/debug.py` | 0.191 | one-liner | 20 |
+| `inferr/stt.py` | 0.184 | one-liner | 18 |
+| `typings/ptyprocess.pyi` | 0.180 | one-liner | 22 |
+| `PROJECT_CONTEXT.md` | 0.169 | one-liner | 11 |
+| `requirements.txt` | 0.169 | one-liner | 10 |
+| `inferr/context/history.py` | 0.169 | one-liner | 21 |
+| `tests/test_offline.py` | 0.133 | one-liner | 23 |
+| `tests/test_wakeword.py` | 0.133 | one-liner | 18 |
+| `tests/test_persistence.py` | 0.119 | one-liner | 15 |
+| `tests/test_stt.py` | 0.119 | one-liner | 22 |
+| `typings/pyttsx3.pyi` | 0.118 | one-liner | 23 |
+| `.gitignore` | 0.100 | one-liner | 10 |
+| `tests/test_llm_context.py` | 0.099 | one-liner | 22 |
+| `extensions/vscode/README.md` | 0.094 | one-liner | 15 |
 
 ## PERIPHERY
 
-- `tests/test_llm.py` — 9 functions, 5 imports, 227 lines
-- `tests/test_server.py` — 13 functions, 7 imports, 203 lines
-- `tests/test_context.py` — 16 functions, 14 imports, 285 lines
+- `tests/test_context.py` — 19 functions, 17 imports, 347 lines
 - `tests/test_tts.py` — 21 functions, 12 imports, 274 lines
-- `pyproject.toml` — 54 lines
-- `inferr/context/__init__.py` — 1 class, 9 imports, 76 lines
-- `inferr/__init__.py` — 1 imports, 10 lines
+- `tests/test_llm.py` — 9 functions, 5 imports, 231 lines
+- `tests/test_server.py` — 13 functions, 7 imports, 203 lines
+- `pyproject.toml` — 64 lines
 - `tests/test_tts_preprocessing.py` — 9 functions, 1 imports, 54 lines
+- `inferr/__init__.py` — 1 imports, 10 lines
+- `README.md` — 60 lines
 - `browser/index.html` — 95 lines
+- `inferr/persistence.py` — Lightweight SQLite-backed session persistence for Inferr.
+- `inferr/wakeword.py` — Wake word detection for Inferr using openwakeword.
 - `tests/test_llm_prompt.py` — 16 functions, 1 imports, 102 lines
-- `typings/ptyprocess.pyi` — 1 class, 1 imports, 20 lines
 - `tests/test_errors.py` — 15 functions, 3 imports, 177 lines
-- `requirements.txt` — 71 lines
-- `PROJECT_CONTEXT.md` — 266 lines
-- `README.md` — 50 lines
-- `inferr/context/files.py` — 2 classs, 1 function, 8 imports, 129 lines
 - `inferr/debug.py` — 1 class, 4 imports, 41 lines
-- `typings/pyttsx3.pyi` — 1 class, 1 function, 9 lines
+- `inferr/stt.py` — Local STT backend using faster-whisper.
+- `typings/ptyprocess.pyi` — 1 class, 1 imports, 20 lines
+- `PROJECT_CONTEXT.md` — 266 lines
+- `requirements.txt` — 71 lines
 - `inferr/context/history.py` — 2 functions, 3 imports, 48 lines
-- `inferr/shell/inferr.bash` — 27 lines
-- `inferr/shell/inferr.zsh` — 36 lines
+- `tests/test_offline.py` — Tests for offline LLM fallback (ollama) and config loading.
+- `tests/test_wakeword.py` — Tests for WakeWordDetector module.
+- `tests/test_persistence.py` — Tests for SQLite session persistence.
+- `tests/test_stt.py` — Tests for the local STT backend (faster-whisper).
+- `typings/pyttsx3.pyi` — 1 class, 1 function, 9 lines
 - `.gitignore` — 30 lines
+- `tests/test_llm_context.py` — 3 functions, 3 imports, 47 lines
+- `extensions/vscode/README.md` — 37 lines
+- `extensions/vscode/package.json` — 31 lines
+- `inferr/shell/inferr.bash` — 57 lines
+- `inferr/shell/inferr.zsh` — 62 lines
 

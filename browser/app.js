@@ -117,8 +117,9 @@ const silkPlayer = (() => {
             source.buffer = audioBuffer;
             source.connect(_analyser);
 
-            // Schedule gaplessly: start immediately if behind currentTime
-            const startAt = Math.max(_ctx.currentTime + 0.01, _nextStartTime);
+            // Schedule gaplessly: use minimal lookahead (5ms) for lowest latency on first chunk
+            const lookahead = (_nextStartTime === 0) ? 0.005 : 0.0;
+            const startAt = Math.max(_ctx.currentTime + lookahead, _nextStartTime);
             source.start(startAt);
             _nextStartTime = startAt + audioBuffer.duration;
             _activeSources += 1;
@@ -296,16 +297,22 @@ async function loadBrowserConfig() {
         const res = await fetch("/config/browser");
         const cfg = await res.json();
         deepgramEnabled = cfg.deepgram_enabled === true;
+        const localSttEnabled = cfg.local_stt_enabled === true;
         if (cfg.stt_sample_rate) {
             sttSampleRate = Number(cfg.stt_sample_rate) || 16000;
         }
         if (cfg.tts_backend) {
             setTtsBackend(cfg.tts_backend);
         }
-        if (!deepgramEnabled) {
-            voiceWarning.textContent = "DEEPGRAM_API_KEY not set. Use text input.";
+
+        if (!deepgramEnabled && !localSttEnabled) {
+            voiceWarning.textContent = "Voice input unavailable (no STT backend). Use text input.";
             voiceWarning.classList.remove("hidden");
             micBtn.classList.add("hidden");
+        } else if (localSttEnabled) {
+            // Local faster-whisper is active — mic is always available
+            deepgramEnabled = true; // reuse the same gate for startMic()
+            console.log("[STT] Local faster-whisper backend active");
         }
     } catch (error) {
         console.error("Failed to load browser config:", error);
@@ -435,6 +442,25 @@ function handleTextMessage(payload) {
 
     if (payload.type === "error") {
         addExchange("", String(payload.message || "Unknown error"), true);
+    }
+
+    if (payload.type === "wake_word") {
+        const phrase = payload.phrase || "wake word";
+        const score = payload.score ? ` (${(payload.score * 100).toFixed(0)}%)` : "";
+        console.info(`[inferr] wake_word detected: ${phrase}${score}`);
+
+        // Visual pulse on the mic button
+        micBtn.classList.add("wake-pulse");
+        setTimeout(() => micBtn.classList.remove("wake-pulse"), 1200);
+
+        // Auto-start listening if not already active
+        if (!micActive) {
+            try {
+                await startMic();
+            } catch (e) {
+                console.warn("[STT] Failed to auto-start mic on wake word:", e);
+            }
+        }
     }
 }
 

@@ -11,8 +11,10 @@ from inferr.models import (
     DeepgramConfig,
     GeminiConfig,
     GroqConfig,
+    OllamaConfig,
     QueryRequest,
     SilkConfig,
+    WakeWordConfig,
 )
 
 
@@ -43,7 +45,7 @@ def _base_context(history: list[tuple[str, str]] | None = None) -> ContextObject
     )
 
 
-def _base_config() -> Config:
+def _base_config(ollama_enabled: bool = False) -> Config:
     return Config(
         terminal_buffer_lines=50,
         history_depth=20,
@@ -56,6 +58,8 @@ def _base_config() -> Config:
         gemini=GeminiConfig(),
         groq=GroqConfig(api_key="test-key", model="llama-3.3-70b-versatile"),
         deepgram=DeepgramConfig(),
+        ollama=OllamaConfig(enabled=ollama_enabled),
+        wakeword=WakeWordConfig(),
     )
 
 

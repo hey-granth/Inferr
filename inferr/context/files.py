@@ -75,6 +75,8 @@ class FileWatcher:
         self._lock = threading.Lock()
         self._root = Path.cwd()
         self._started = False
+        # Flag: True when active file was set by editor plugin push (not filesystem)
+        self._pushed_by_editor: bool = False
 
     def _resolve_path(self, raw: str) -> Path | None:
         token = raw.strip().strip("\"'")
@@ -194,6 +196,42 @@ class FileWatcher:
     def get_active_file(self) -> ActiveFile | None:
         with self._lock:
             return self._active_file
+
+    def push_active_file(
+        self,
+        path: str,
+        content: str = "",
+        language: str = "",
+    ) -> None:
+        """Accept active file state from an editor plugin.
+
+        This captures unsaved buffer state — what the developer is
+        actively editing RIGHT NOW, not what was last saved to disk.
+        Editor pushes take priority over filesystem events.
+        """
+        file_path = Path(path)
+        resolved_language = language or _LANGUAGE_MAP.get(file_path.suffix.lower(), "unknown")
+
+        # Truncate to configured line limit
+        lines = content.splitlines()[: self._config.file_lines]
+        truncated_content = "\n".join(lines)
+
+        try:
+            mtime = file_path.stat().st_mtime if file_path.exists() else 0.0
+            modified = datetime.fromtimestamp(mtime, tz=timezone.utc) if mtime else datetime.now(timezone.utc)
+        except OSError:
+            modified = datetime.now(timezone.utc)
+
+        active_file = ActiveFile(
+            path=str(file_path),
+            language=resolved_language,
+            content=truncated_content,
+            last_modified=modified,
+        )
+
+        with self._lock:
+            self._active_file = active_file
+            self._pushed_by_editor = True
 
     def start(self) -> None:
         if self._started:

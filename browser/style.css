@@ -185,6 +185,20 @@ body::before {
     50%       { opacity: 0.8; }
 }
 
+/* Wake word detected flash — brief cyan ring-expand, auto-removed after 1.2s */
+#mic-btn.wake-pulse {
+    border-color: #ffffff;
+    color: #ffffff;
+    box-shadow: 0 0 0 0 rgba(0, 212, 255, 0.7);
+    animation: wakePulse 0.6s ease-out 2;
+}
+
+@keyframes wakePulse {
+    0%   { box-shadow: 0 0 0 0 rgba(0, 212, 255, 0.7); }
+    70%  { box-shadow: 0 0 0 12px rgba(0, 212, 255, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(0, 212, 255, 0); }
+}
+
 #mic-icon {
     width: 22px;
     height: 22px;

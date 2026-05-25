@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Mapping, cast
 import tomllib
 
-from inferr.models import DeepgramConfig, GeminiConfig, GroqConfig, SilkConfig
+from inferr.models import DeepgramConfig, GeminiConfig, GroqConfig, OllamaConfig, SilkConfig, WakeWordConfig
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,8 @@ class Config:
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
     groq: GroqConfig = field(default_factory=GroqConfig)
     deepgram: DeepgramConfig = field(default_factory=DeepgramConfig)
+    ollama: OllamaConfig = field(default_factory=OllamaConfig)
+    wakeword: WakeWordConfig = field(default_factory=WakeWordConfig)
 
 
 _DEFAULT_TERMINAL_BUFFER_LINES = 50
@@ -62,6 +64,21 @@ def _default_toml() -> str:
         'api_key = ""\n'
         'model = "nova-2"\n'
         'language = "en-IN"\n'
+        "\n"
+        "# Offline LLM fallback — used when Gemini is unreachable\n"
+        "[ollama]\n"
+        "enabled = true\n"
+        'model = "llama3.2:3b"\n'
+        'url = "http://localhost:11434"\n'
+        "timeout_seconds = 20.0\n"
+        "\n"
+        "# Wake word detector (requires openwakeword + sounddevice)\n"
+        "[wakeword]\n"
+        "enabled = false\n"
+        '# model_name = "alexa"  # pre-trained model name\n'
+        '# model_path = ""      # full path to custom .onnx; overrides model_name\n'
+        "# threshold = 0.5\n"
+        "# cooldown_seconds = 3.0\n"
     )
 
 
@@ -242,6 +259,62 @@ def load_config() -> Config:
         language=deepgram_language,
     )
 
+    # ---- Ollama (offline fallback) -----------------------------------------------
+    raw_ollama_obj = data.get("ollama")
+    raw_ollama = (
+        cast(dict[object, object], raw_ollama_obj)
+        if isinstance(raw_ollama_obj, dict)
+        else {}
+    )
+    ollama_enabled = _coerce_bool(
+        os.environ.get("INFERR_OFFLINE", raw_ollama.get("enabled", True)), True
+    )
+    ollama_model = os.environ.get(
+        "OLLAMA_MODEL", _coerce_str(raw_ollama.get("model"), "llama3.2:3b")
+    )
+    ollama_url = os.environ.get(
+        "OLLAMA_URL", _coerce_str(raw_ollama.get("url"), "http://localhost:11434")
+    )
+    ollama_timeout = float(
+        _coerce_str(raw_ollama.get("timeout_seconds", "20.0"), "20.0") or "20.0"
+    )
+    ollama_config = OllamaConfig(
+        enabled=ollama_enabled,
+        model=ollama_model,
+        url=ollama_url,
+        timeout_seconds=ollama_timeout,
+    )
+
+    # ---- Wake word ---------------------------------------------------------------
+    raw_ww_obj = data.get("wakeword")
+    raw_ww = (
+        cast(dict[object, object], raw_ww_obj)
+        if isinstance(raw_ww_obj, dict)
+        else {}
+    )
+    ww_enabled = _coerce_bool(
+        os.environ.get("INFERR_WAKEWORD_ENABLED", raw_ww.get("enabled", False)),
+        False,
+    )
+    ww_model_name = os.environ.get(
+        "INFERR_WAKEWORD_MODEL",
+        _coerce_str(raw_ww.get("model_name"), "alexa"),
+    )
+    ww_model_path = _coerce_str(raw_ww.get("model_path"), "")
+    ww_threshold = float(
+        _coerce_str(raw_ww.get("threshold", "0.5"), "0.5") or "0.5"
+    )
+    ww_cooldown = float(
+        _coerce_str(raw_ww.get("cooldown_seconds", "3.0"), "3.0") or "3.0"
+    )
+    wakeword_config = WakeWordConfig(
+        enabled=ww_enabled,
+        model_name=ww_model_name,
+        model_path=ww_model_path,
+        threshold=ww_threshold,
+        cooldown_seconds=ww_cooldown,
+    )
+
     return Config(
         terminal_buffer_lines=terminal_buffer_lines,
         history_depth=history_depth,
@@ -254,4 +327,6 @@ def load_config() -> Config:
         gemini=gemini_config,
         groq=groq_config,
         deepgram=deepgram_config,
+        ollama=ollama_config,
+        wakeword=wakeword_config,
     )

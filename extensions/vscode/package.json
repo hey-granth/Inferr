@@ -1,0 +1,30 @@
+{
+  "name": "inferr-companion",
+  "displayName": "Inferr Companion",
+  "description": "Ambient editor awareness for Inferr — pushes active buffer to the Inferr context endpoint.",
+  "version": "0.1.0",
+  "publisher": "inferr",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Inferr Companion",
+      "properties": {
+        "inferr.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:7331",
+          "description": "Inferr server URL"
+        },
+        "inferr.pushIntervalMs": {
+          "type": "number",
+          "default": 2000,
+          "description": "How often (ms) to push active buffer to Inferr"
+        }
+      }
+    }
+  }
+}

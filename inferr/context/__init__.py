@@ -40,6 +40,12 @@ class ContextAssembler:
         """Try to resolve the active file from a captured shell command."""
         self._file_watcher.hint_from_shell_command(command)
 
+    def push_active_file(
+        self, path: str, content: str = "", language: str = ""
+    ) -> None:
+        """Accept an unsaved buffer push from an editor plugin."""
+        self._file_watcher.push_active_file(path=path, content=content, language=language)
+
     def assemble(
         self, session_id: str, conversation_history: list[ConversationTurn]
     ) -> ContextObject:

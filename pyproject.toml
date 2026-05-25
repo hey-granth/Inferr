@@ -23,9 +23,13 @@ dependencies = [
   "websockets>=12.0",
   "pyttsx3>=2.90",
   "python-dotenv>=1.2.2",
+  "faster-whisper>=1.2.1",
 ]
 
 [project.optional-dependencies]
+stt = [
+  "faster-whisper>=1.0.0",
+]
 dev = [
   "pytest>=8.2.0",
   "pytest-asyncio>=0.23.0",
@@ -52,3 +56,8 @@ typeCheckingMode = "strict"
 stubPath = "typings"
 venvPath = "."
 venv = ".venv"
+
+[dependency-groups]
+dev = [
+    "respx>=0.23.1",
+]

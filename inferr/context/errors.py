@@ -35,7 +35,7 @@ def _should_emit(error_type: str, summary: str) -> bool:
     now = time.time()
     key = f"{error_type}:{summary}"
     last_seen = _ERROR_DEDUP.get(key)
-    if last_seen is not None and (now - last_seen) < 10.0:
+    if last_seen is not None and (now - last_seen) < 60.0:  # 60s dedup window
         return False
     _ERROR_DEDUP[key] = now
     return True

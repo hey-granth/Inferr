@@ -12,10 +12,10 @@ import time
 import uuid
 import json
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from inferr.config import Config, load_config
 from inferr.context import ContextAssembler
@@ -34,6 +34,8 @@ from inferr.models import (
 from inferr import pipeline as pipeline_stages
 from inferr.tts import SilkTTSBackend, TTSBackend, get_tts_backend, tts_timeout_seconds
 from inferr.debug import debug_logger
+from inferr.wakeword import WakeWordDetector
+import inferr.persistence as db
 
 logger = logging.getLogger("inferr.server")
 
@@ -42,6 +44,13 @@ context_assembler: ContextAssembler | None = None
 conversation_history: list[ConversationTurn] = []
 tts_backend: TTSBackend | None = None
 last_activity: datetime | None = None
+
+# Wake word detector (optional — requires openwakeword + sounddevice)
+_wake_detector: WakeWordDetector | None = None
+# All live /ws WebSocket connections (for wake-word broadcast)
+_ws_clients: set[WebSocket] = set()
+# Reference to the running event loop — set once on first WS connect
+_event_loop: asyncio.AbstractEventLoop | None = None
 
 _shell_command_buffer: list[str] = []
 _SHELL_BUFFER_MAX = 200
@@ -88,11 +97,20 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if _wake_detector is not None:
+            _wake_detector.stop()
         if context_assembler is not None:
             context_assembler.stop()
+        db.close_conn()
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> Response:
+    """Return 204 No Content for favicon to prevent log pollution."""
+    return Response(status_code=204)
 
 
 @app.exception_handler(Exception)
@@ -108,6 +126,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 async def start_session() -> dict[str, str]:
     """Initialize a new Inferr session and context capture."""
     global session_id, context_assembler, conversation_history, tts_backend
+    global _wake_detector
 
     config = get_config()
     if context_assembler is not None:
@@ -119,9 +138,30 @@ async def start_session() -> dict[str, str]:
     session_id = str(uuid.uuid4())
     conversation_history = []
 
+    # Start wake word detector if configured
+    if config.wakeword.enabled:
+        if _wake_detector is not None:
+            _wake_detector.stop()
+        _wake_detector = WakeWordDetector(
+            model_name=config.wakeword.model_name,
+            model_path=config.wakeword.model_path,
+            threshold=config.wakeword.threshold,
+            cooldown_seconds=config.wakeword.cooldown_seconds,
+        )
+        started = _wake_detector.start(on_detected=_on_wake_word_detected)
+        if not started:
+            logger.warning(
+                "WAKEWORD_START_FAILED wakeword.enabled=true but deps unavailable — "
+                "run: uv add openwakeword sounddevice"
+            )
+
     if os.environ.get("INFERR_NO_BROWSER") != "1":
         try:
-            subprocess.Popen(["google-chrome", f"http://{config.host}:{config.port}"])
+            subprocess.Popen(
+                ["google-chrome", f"http://{config.host}:{config.port}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except (OSError, FileNotFoundError):
             logger.info("Unable to open browser companion UI.")
 
@@ -132,7 +172,11 @@ async def start_session() -> dict[str, str]:
 async def stop_session() -> dict[str, str]:
     """Stop the current Inferr session."""
     global session_id, context_assembler, conversation_history, tts_backend
+    global _wake_detector
 
+    if _wake_detector is not None:
+        _wake_detector.stop()
+        _wake_detector = None
     if context_assembler is not None:
         context_assembler.stop()
     context_assembler = None
@@ -156,11 +200,15 @@ async def get_context() -> JSONResponse:
 @app.get("/health")
 async def health() -> dict[str, object | None]:
     """Return server health status."""
+    stats = {}
+    if session_id:
+        stats = db.get_session_stats(session_id)
     return {
         "status": "ok",
         "session_active": session_id is not None,
         "last_activity": last_activity.isoformat() if last_activity else None,
         "tts_backend": tts_backend.name() if tts_backend is not None else None,
+        "session_stats": stats,
     }
 
 
@@ -168,12 +216,17 @@ async def health() -> dict[str, object | None]:
 async def browser_config() -> dict[str, object]:
     """Return config the browser needs at runtime. Only non-secret values."""
     cfg = get_config()
+    from inferr.stt import is_faster_whisper_available
+    use_local_stt = is_faster_whisper_available()
     return {
-        "deepgram_enabled": bool(cfg.deepgram.api_key),
+        "deepgram_enabled": bool(cfg.deepgram.api_key) and not use_local_stt,
+        "local_stt_enabled": use_local_stt,
         "tts_backend": tts_backend.name() if tts_backend else "browser",
         "stt_sample_rate": 16000,
         "stt_encoding": "linear16",
         "stt_channels": 1,
+        "wake_word_enabled": cfg.wakeword.enabled,
+        "wake_word_model": cfg.wakeword.model_name,
     }
 
 
@@ -394,9 +447,45 @@ def resolve_tone(context: ContextObject) -> str:
     return "neutral"
 
 
+# ---------------------------------------------------------------------------
+# Wake word broadcast bridge (thread → asyncio event loop)
+# ---------------------------------------------------------------------------
+
+def _on_wake_word_detected(phrase: str, score: float) -> None:
+    """Called from the WakeWordDetector background thread.
+
+    Bridges to the asyncio event loop via call_soon_threadsafe so we can
+    safely push a WebSocket message to all connected browser clients.
+    """
+    if _event_loop is None:
+        return
+    _event_loop.call_soon_threadsafe(
+        lambda: asyncio.create_task(_broadcast_wake_word(phrase, score))
+    )
+
+
+async def _broadcast_wake_word(phrase: str, score: float) -> None:
+    """Fan out a wake_word event to all live /ws clients."""
+    if not _ws_clients:
+        return
+    payload = {"type": "wake_word", "phrase": phrase, "score": round(score, 3)}
+    dead: set[WebSocket] = set()
+    for ws in list(_ws_clients):
+        try:
+            await ws.send_json(payload)
+            logger.info("WAKEWORD_BROADCAST phrase=%s score=%.3f", phrase, score)
+        except Exception:
+            dead.add(ws)
+    _ws_clients.difference_update(dead)
+
+
+# ---------------------------------------------------------------------------
+# Local STT WebSocket — replaces Deepgram proxy when faster-whisper available
+# ---------------------------------------------------------------------------
+
 @app.websocket("/ws/stt")
 async def speech_to_text_endpoint(websocket: WebSocket) -> None:
-    """Proxy browser microphone audio to Deepgram without exposing API keys."""
+    """Handle STT: local faster-whisper if available, else Deepgram proxy."""
     client_host = websocket.client.host if websocket.client else "unknown"
     logger.info("STT_CLIENT_CONNECTED client=%s", client_host)
 
@@ -406,18 +495,109 @@ async def speech_to_text_endpoint(websocket: WebSocket) -> None:
         logger.exception("STT_CLIENT_ACCEPT_FAILED client=%s error=%s", client_host, e)
         return
 
+    from inferr.stt import is_faster_whisper_available
+
+    if is_faster_whisper_available():
+        await _handle_local_stt(websocket, client_host)
+    else:
+        await _handle_deepgram_stt(websocket, client_host)
+
+
+async def _handle_local_stt(websocket: WebSocket, client_host: str) -> None:
+    """Run faster-whisper on incoming PCM16 audio and stream results back."""
+    from inferr.stt import get_shared_session
+    cfg = get_config()
+
+    try:
+        model_size = getattr(cfg, "whisper_model", "small")
+    except AttributeError:
+        model_size = "small"
+
+    logger.info("STT_LOCAL_WHISPER client=%s model=%s", client_host, model_size)
+
+    try:
+        session = await get_shared_session(model_size=model_size)
+    except Exception as exc:
+        logger.exception("STT_WHISPER_LOAD_FAILED error=%s", exc)
+        await websocket.send_json({"type": "error", "message": f"STT init failed: {exc}"})
+        await websocket.close(code=1011)
+        return
+
+    # Queue to bridge WebSocket receive → async generator
+    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
+
+    async def receive_audio() -> None:
+        try:
+            while True:
+                message = await websocket.receive()
+                msg_type = message.get("type")
+                if msg_type == "websocket.disconnect":
+                    logger.info("STT_CLIENT_DISCONNECTED client=%s", client_host)
+                    await audio_queue.put(None)  # sentinel
+                    return
+                payload_bytes = message.get("bytes")
+                if isinstance(payload_bytes, bytes):
+                    try:
+                        audio_queue.put_nowait(payload_bytes)
+                    except asyncio.QueueFull:
+                        logger.warning("STT_QUEUE_FULL dropping chunk client=%s", client_host)
+        except WebSocketDisconnect:
+            await audio_queue.put(None)
+        except Exception as exc:
+            logger.exception("STT_RECEIVE_FAILED client=%s error=%s", client_host, exc)
+            await audio_queue.put(None)
+
+    async def audio_chunks():
+        while True:
+            chunk = await audio_queue.get()
+            if chunk is None:
+                return
+            yield chunk
+
+    async def transcribe_and_send() -> None:
+        try:
+            async for result in session.process_audio_stream(audio_chunks()):
+                await websocket.send_text(json.dumps(result))
+                transcript = (
+                    result.get("channel", {})
+                    .get("alternatives", [{}])[0]
+                    .get("transcript", "")
+                )
+                logger.info("STT_LOCAL_TRANSCRIPT client=%s text=%r", client_host, transcript[:80])
+        except WebSocketDisconnect:
+            pass
+        except Exception as exc:
+            logger.exception("STT_TRANSCRIBE_SEND_FAILED client=%s error=%s", client_host, exc)
+
+    receive_task = asyncio.create_task(receive_audio())
+    transcribe_task = asyncio.create_task(transcribe_and_send())
+
+    try:
+        done, pending = await asyncio.wait(
+            {receive_task, transcribe_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+    except asyncio.CancelledError:
+        pass
+    except WebSocketDisconnect:
+        pass
+
+
+async def _handle_deepgram_stt(websocket: WebSocket, client_host: str) -> None:
+    """Proxy browser PCM16 audio to Deepgram when local STT unavailable."""
     cfg = get_config()
     if not cfg.deepgram.api_key:
         logger.error("STT_DEEPGRAM_NOT_CONFIGURED client=%s", client_host)
         await websocket.send_json(
-            {"type": "error", "message": "Deepgram is not configured"}
+            {"type": "error", "message": "Deepgram is not configured and faster-whisper is not installed"}
         )
         await websocket.close(code=1011)
         return
 
     import websockets
 
-    # Browser streams raw PCM16 (linear16) from Web Audio — not MediaRecorder WebM.
     stt_sample_rate = 16000
     deepgram_url = (
         "wss://api.deepgram.com/v1/listen"
@@ -439,65 +619,28 @@ async def speech_to_text_endpoint(websocket: WebSocket) -> None:
             while True:
                 message = await websocket.receive()
                 message_type = message.get("type")
-                logger.debug("STT_CLIENT_MESSAGE client=%s type=%s", client_host, message_type)
-
                 if message_type == "websocket.disconnect":
                     logger.info("STT_CLIENT_DISCONNECTED client=%s", client_host)
                     try:
                         await deepgram_ws.send('{"type":"CloseStream"}')
-                        logger.debug("STT_CLOSE_STREAM_SENT client=%s", client_host)
                     except Exception as e:
                         logger.warning("STT_CLOSE_STREAM_FAILED client=%s error=%s", client_host, e)
                     return
-
                 payload_bytes = message.get("bytes")
                 if isinstance(payload_bytes, bytes):
-                    chunk_size = len(payload_bytes)
-                    first_bytes_hex = payload_bytes[:16].hex() if payload_bytes else ""
-                    logger.info(
-                        "STT_CHUNK_META client=%s size=%d first_bytes=%s",
-                        client_host, chunk_size, first_bytes_hex
-                    )
                     await deepgram_ws.send(payload_bytes)
-                    logger.debug("STT_CHUNK_SENT_TO_DEEPGRAM client=%s size=%d", client_host, chunk_size)
                     continue
-
                 payload_text = message.get("text")
                 if isinstance(payload_text, str):
-                    logger.info("STT_TEXT_MESSAGE client=%s text=%s", client_host, payload_text[:100])
-                    if payload_text.strip() == '{"type":"KeepAlive"}':
-                        logger.debug("STT_KEEPALIVE_RECEIVED client=%s", client_host)
                     await deepgram_ws.send(payload_text)
 
         async def deepgram_to_browser() -> None:
             try:
                 async for message in deepgram_ws:
                     if isinstance(message, str):
-                        logger.debug("DEEPGRAM_RAW_MESSAGE client=%s len=%d", client_host, len(message))
-                        try:
-                            import json
-                            msg_data = json.loads(message)
-                            msg_type = msg_data.get("type", "unknown")
-                            logger.info("DEEPGRAM_MESSAGE client=%s type=%s", client_host, msg_type)
-
-                            if msg_type == "Results":
-                                is_final = msg_data.get("is_final", False)
-                                transcript = msg_data.get("channel", {}).get("alternatives", [{}])[0].get("transcript", "")
-                                if transcript:
-                                    logger.info(
-                                        "DEEPGRAM_TRANSCRIPT client=%s is_final=%s transcript=%s",
-                                        client_host, is_final, transcript[:100]
-                                    )
-                            elif msg_type == "error":
-                                error_msg = msg_data.get("error", "unknown")
-                                logger.error("DEEPGRAM_ERROR client=%s error=%s", client_host, error_msg)
-                        except json.JSONDecodeError:
-                            logger.warning("DEEPGRAM_INVALID_JSON client=%s len=%d", client_host, len(message))
-
                         await websocket.send_text(message)
             except websockets.exceptions.ConnectionClosed as e:
-                logger.info("DEEPGRAM_CONNECTION_CLOSED client=%s code=%s reason=%s",
-                           client_host, e.code, e.reason)
+                logger.info("DEEPGRAM_CONNECTION_CLOSED client=%s code=%s", client_host, e.code)
             except Exception as e:
                 logger.exception("DEEPGRAM_TO_BROWSER_FAILED client=%s error=%s", client_host, e)
 
@@ -511,24 +654,21 @@ async def speech_to_text_endpoint(websocket: WebSocket) -> None:
             )
             for task in pending:
                 task.cancel()
-                logger.debug("STT_TASK_CANCELLED client=%s task=%s", client_host, task)
             for task in done:
                 exc = task.exception()
                 if exc is not None:
-                    logger.exception("STT_TASK_FAILED client=%s error=%s", client_host, exc)
                     raise exc
         except asyncio.CancelledError:
-            logger.info("STT_TASKS_CANCELLED client=%s", client_host)
+            pass
 
     except WebSocketDisconnect:
-        logger.info("STT_WEBSOCKET_DISCONNECTED client=%s", client_host)
+        pass
     except Exception as exc:
         logger.exception("STT_WEBSOCKET_FAILURE client=%s error=%s", client_host, exc)
         try:
             await websocket.send_json({"type": "error", "message": str(exc)})
         except RuntimeError:
-            logger.warning("STT_ERROR_SEND_FAILED client=%s", client_host)
-            return
+            pass
         await websocket.close(code=1011)
 
 
@@ -695,12 +835,20 @@ async def debug_pipeline_status() -> dict[str, object]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Main conversational WebSocket
+# ---------------------------------------------------------------------------
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     """Handle WebSocket transcript streaming and LLM responses."""
-    global _main_websocket
+    global _main_websocket, last_activity, _event_loop
     await websocket.accept()
     _main_websocket = websocket
+
+    # Capture event loop reference for wake word thread bridge
+    _event_loop = asyncio.get_running_loop()
+    _ws_clients.add(websocket)
 
     debug_logger.log_stage("websocket_connected", {"client": websocket.client.host if websocket.client else "unknown"})
 
@@ -726,16 +874,32 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     websocket, message.payload, source="websocket"
                 )
 
+
     except WebSocketDisconnect:
         debug_logger.log_stage("websocket_disconnected", {"reason": "client disconnected"})
         logger.info("WebSocket disconnected.")
     except Exception as exc:
         debug_logger.log_stage("websocket_error", {"error": str(exc)})
-        await websocket.send_json({"type": "error", "message": str(exc)})
-        await websocket.close(code=1011)
+        try:
+            await websocket.send_json({"type": "error", "message": str(exc)})
+            await websocket.close(code=1011)
+        except Exception:
+            pass
     finally:
         if _main_websocket is websocket:
             _main_websocket = None
+        _ws_clients.discard(websocket)
+
+
+# ---------------------------------------------------------------------------
+# Shell command + output capture
+# ---------------------------------------------------------------------------
+
+class ShellOutputCapture(BaseModel):
+    command: str
+    exit_code: int = 0
+    output: str = ""       # Combined stdout + stderr (may be truncated)
+    output_lines: int = 0  # Total lines before truncation
 
 
 @app.post("/capture/command")
@@ -749,12 +913,115 @@ async def capture_command(payload: ShellCommandCapture) -> dict[str, str]:
     if len(_shell_command_buffer) > _SHELL_BUFFER_MAX:
         _shell_command_buffer = _shell_command_buffer[-_SHELL_BUFFER_MAX:]
 
-    # Also inject into active session's terminal buffer for error detection
     if context_assembler is not None:
         context_assembler.inject_command(entry)
         context_assembler.hint_active_file_from_command(payload.command)
 
+    # Persist to SQLite
+    if session_id:
+        asyncio.create_task(
+            db.save_command(session_id, payload.command, payload.exit_code)
+        )
+
     return {"status": "ok"}
+
+
+@app.post("/capture/output")
+async def capture_output(payload: ShellOutputCapture) -> dict[str, str]:
+    """Receive real stdout/stderr from the shell integration plugin.
+
+    This gives the assistant visibility into actual command output:
+    stack traces, compiler errors, test failures, etc.
+    """
+    global _shell_command_buffer
+
+    # Build a command entry with the real output
+    entry = payload.command
+    if payload.exit_code != 0:
+        entry = f"{payload.command}  [exit {payload.exit_code}]"
+
+    # Inject command first (so context ordering is preserved)
+    _shell_command_buffer.append(entry)
+    if len(_shell_command_buffer) > _SHELL_BUFFER_MAX:
+        _shell_command_buffer = _shell_command_buffer[-_SHELL_BUFFER_MAX:]
+
+    if context_assembler is not None:
+        context_assembler.inject_command(entry)
+        context_assembler.hint_active_file_from_command(payload.command)
+
+        # Inject real output lines into terminal buffer for error detection
+        if payload.output:
+            output_lines = payload.output.splitlines()
+            # Limit to 100 lines max to prevent buffer flooding
+            for line in output_lines[-100:]:
+                if line.strip():
+                    context_assembler.inject_command(line)
+
+    # Persist command + output
+    if session_id:
+        asyncio.create_task(
+            db.save_command(session_id, payload.command, payload.exit_code, payload.output[:4000])
+        )
+
+    logger.info(
+        "SHELL_OUTPUT_CAPTURED cmd=%r exit=%d lines=%d",
+        payload.command[:60],
+        payload.exit_code,
+        payload.output_lines,
+    )
+
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Active file context push (for editor plugins)
+# ---------------------------------------------------------------------------
+
+class ActiveFilePayload(BaseModel):
+    path: str
+    content: str = ""
+    language: str = ""
+
+
+@app.post("/context/file")
+async def push_active_file(payload: ActiveFilePayload) -> dict[str, str]:
+    """Editor plugins push the active buffer here for ambient awareness.
+
+    Accepts unsaved state — the developer's current focus.
+    """
+    if context_assembler is None:
+        return {"status": "no_session"}
+
+    context_assembler.push_active_file(
+        path=payload.path,
+        content=payload.content,
+        language=payload.language,
+    )
+    logger.info(
+        "ACTIVE_FILE_PUSHED path=%s language=%s content_len=%d",
+        payload.path,
+        payload.language,
+        len(payload.content),
+    )
+    return {"status": "ok"}
+
+
+@app.get("/context/file")
+async def get_active_file_context(path: str = "") -> JSONResponse:
+    """Read current active file context (for debugging/extension polling)."""
+    if context_assembler is None:
+        return JSONResponse(status_code=404, content={"error": "No active session"})
+    active = context_assembler._file_watcher.get_active_file()
+    if active is None:
+        return JSONResponse(status_code=204, content={})
+    return JSONResponse(
+        status_code=200,
+        content={
+            "path": active.path,
+            "language": active.language,
+            "content_preview": active.content[:500],
+        },
+    )
 
 
 @app.post("/query", response_model=QueryResponse)
